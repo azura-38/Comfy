@@ -51,7 +51,7 @@ app.post('/api/assets/character-sprite', async (req, res) => {
       return;
     }
 
-    const match = /^data:(image\\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\\r\\n]+)$/.exec(dataUrl);
+    const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\r\n]+)$/.exec(dataUrl);
     if (!match) {
       res.status(400).json({ error: 'Only PNG, JPEG, and WebP data URLs are accepted.' });
       return;
@@ -65,7 +65,7 @@ app.post('/api/assets/character-sprite', async (req, res) => {
 
     const extension = match[1] === 'image/jpeg' ? '.jpg' : match[1] === 'image/webp' ? '.webp' : '.png';
     const safeStem = fileName
-      .replace(/\\.[^.]+$/, '')
+      .replace(/\.[^.]+$/, '')
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, '-')
       .replace(/^-+|-+$/g, '')
