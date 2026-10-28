@@ -1,3 +1,5 @@
+import type { ComfyObjectInfoResponse } from './comfyApiClient';
+
 export type GenreSetting = 'Cyberpunk' | 'Sci-Fi' | 'Fantasy';
 export type BaseModelArchitecture =
   | 'LTX-Video'
@@ -920,63 +922,141 @@ export function compileLocalLTXVMotionPrompt(beat: ResolvedBeat): string {
  * - Frame-Locked 9:16 Latent Dimension Enforcer
  * - Subtitle Burn-In & VHS Batch Video Combine
  */
-export function buildComfyUIWorkflowJSON(
+export interface WorkflowBuildResult {
+  workflow: Record<string, ComfyNode>;
+  fallbacksApplied: string[];
+}
+
+export interface WorkflowValidationIssue {
+  nodeId: string;
+  classType: string;
+  issueType:
+    | 'missing_node_class'
+    | 'missing_required_input'
+    | 'incompatible_link';
+  details: string;
+  missingInputs?: string[];
+}
+
+export interface WorkflowObjectInfoValidationResult {
+  verified: boolean;
+  canSubmitQueue: boolean;
+  checkedNodeCount: number;
+  missingClasses: string[];
+  invalidInputs: Array<{
+    nodeId: string;
+    classType: string;
+    missingRequiredInputs: string[];
+  }>;
+  issues: WorkflowValidationIssue[];
+  fallbacksApplied: string[];
+  summary: string;
+}
+
+/**
+ * Generates an importable ComfyUI API Workflow JSON along with a report of any
+ * safe node fallbacks applied based on the connected ComfyUI `/object_info` response.
+ *
+ * - Node 1: Uses `LTXV23ModelsLoader` for 10Eros v1.5 GGUF / LTX-2.3 (never replaces it with a checkpoint-based `LTXVLoader`), `UNETLoader` for Flux.1-dev, or `CheckpointLoaderSimple` for SDXL/SD1.5.
+ * - Node 2: Uses `EmptyLTXVLatentVideo` for LTX-Video, or safely falls back to `EmptyLatentImage` if `/object_info` reports `EmptyLTXVLatentVideo` is absent and `EmptyLatentImage` is installed.
+ * - Node 5: Uses the installed `AnimateDiffCameraPacingController` (verified `MODEL -> MODEL` input/output schema), or safely bypasses Node 5 and links Node 6 (`conditioning_model`) directly to Node 4 (`MODEL` output) if `AnimateDiffCameraPacingController` is absent in `/object_info`.
+ * - Node 7: Uses the installed `KSampler` with verified `model`, `positive`, `negative`, `latent_image`, `seed`, `steps`, `cfg`, `sampler_name`, `scheduler`, and `denoise` inputs.
+ */
+export function buildComfyUIWorkflowWithFallbacks(
   config: PipelineConfig,
   resolvedBeats: ResolvedBeat[],
   characters: CharacterSheet[],
-  loras: StyleLoRA[]
-): Record<string, ComfyNode> {
+  loras: StyleLoRA[],
+  installedObjectInfo?: ComfyObjectInfoResponse | null
+): WorkflowBuildResult {
   const workflow: Record<string, ComfyNode> = {};
+  const fallbacksApplied: string[] = [];
   const isLTX = config.architecture === 'LTX-Video';
   const ltxFrameCheck = snapToLTXVFrameRule(config.ltxChunkFrames || 161);
 
-  // Node 1: Local Checkpoint Loader
+  const hasLiveObjectInfo = Boolean(
+    installedObjectInfo &&
+      installedObjectInfo.connected &&
+      Array.isArray(installedObjectInfo.installedNodes)
+  );
+  const installedSet = hasLiveObjectInfo
+    ? new Set(installedObjectInfo!.installedNodes)
+    : null;
+  const schemas =
+    hasLiveObjectInfo && installedObjectInfo?.nodeSchemas
+      ? installedObjectInfo.nodeSchemas
+      : {};
+
+  // Node 1: Local Model Loader (10Eros v1.5 GGUF with LTXV23ModelsLoader for LTX-Video)
+  const loaderClass = isLTX
+    ? 'LTXV23ModelsLoader'
+    : config.architecture === 'Flux.1-dev'
+    ? 'UNETLoader'
+    : 'CheckpointLoaderSimple';
+
+  const baseLoaderInputs: Record<string, unknown> = isLTX
+    ? {
+        model_name: config.checkpointName,
+        ckpt_name: config.checkpointName,
+        text_encoder: config.ltxTextEncoder || 't5xxl_fp8_e4m3fn.safetensors',
+        weight_dtype:
+          config.vramProfile === '12GB FP8 Offload' ? 'fp8_e4m3fn' : 'bfloat16',
+        local_offline_mode: true,
+      }
+    : {
+        ckpt_name: config.checkpointName,
+        unet_name: config.checkpointName,
+        weight_dtype:
+          config.architecture === 'Flux.1-dev' ? 'fp8_e4m3fn' : 'default',
+      };
+
   workflow['1'] = {
-    class_type: isLTX
-      ? 'LTXVLoader'
-      : config.architecture === 'Flux.1-dev'
-      ? 'UNETLoader'
-      : 'CheckpointLoaderSimple',
-    inputs: isLTX
-      ? {
-          ckpt_name: config.checkpointName,
-          text_encoder: config.ltxTextEncoder || 't5xxl_fp8_e4m3fn.safetensors',
-          weight_dtype:
-            config.vramProfile === '12GB FP8 Offload' ? 'fp8_e4m3fn' : 'bfloat16',
-          local_offline_mode: true,
-        }
-      : {
-          ckpt_name: config.checkpointName,
-          weight_dtype:
-            config.architecture === 'Flux.1-dev' ? 'fp8_e4m3fn' : 'default',
-        },
+    class_type: loaderClass,
+    inputs: baseLoaderInputs,
     _meta: {
-      title: `Local Checkpoint (${config.architecture})`,
+      title: isLTX
+        ? `10Eros / LTX-2.3 GGUF Loader (${loaderClass})`
+        : `Local Checkpoint (${config.architecture})`,
     },
   };
 
   // Node 2: Empty Latent 9:16 Vertical Frame Enforcer (Matched to Character Sheet)
+  let latentClass = isLTX ? 'EmptyLTXVLatentVideo' : 'EmptyLatentImage';
+  if (
+    isLTX &&
+    installedSet &&
+    !installedSet.has('EmptyLTXVLatentVideo') &&
+    installedSet.has('EmptyLatentImage')
+  ) {
+    latentClass = 'EmptyLatentImage';
+    fallbacksApplied.push(
+      'Node #2: EmptyLTXVLatentVideo not installed in /object_info; fell back to compatible EmptyLatentImage (LATENT output).'
+    );
+  }
+
   workflow['2'] = {
-    class_type: isLTX ? 'EmptyLTXVLatentVideo' : 'EmptyLatentImage',
-    inputs: isLTX
-      ? {
-          width: config.targetWidth,
-          height: config.targetHeight,
-          native_ltx_width: 768,
-          native_ltx_height: 1344,
-          length: ltxFrameCheck.validFrames,
-          frame_rule: ltxFrameCheck.formula,
-          batch_size: resolvedBeats.length || 1,
-        }
-      : {
-          width: config.targetWidth,
-          height: config.targetHeight,
-          batch_size: resolvedBeats.length || 1,
-        },
+    class_type: latentClass,
+    inputs:
+      latentClass === 'EmptyLTXVLatentVideo'
+        ? {
+            width: config.targetWidth,
+            height: config.targetHeight,
+            native_ltx_width: 768,
+            native_ltx_height: 1344,
+            length: ltxFrameCheck.validFrames,
+            frame_rule: ltxFrameCheck.formula,
+            batch_size: resolvedBeats.length || 1,
+          }
+        : {
+            width: config.targetWidth,
+            height: config.targetHeight,
+            batch_size: resolvedBeats.length || 1,
+          },
     _meta: {
-      title: isLTX
-        ? `LTXV 9:16 Latent Video (${ltxFrameCheck.formula} -> ${config.targetWidth}x${config.targetHeight})`
-        : `9:16 Vertical Latent Lock (${config.targetWidth}x${config.targetHeight})`,
+      title:
+        latentClass === 'EmptyLTXVLatentVideo'
+          ? `LTXV 9:16 Latent Video (${ltxFrameCheck.formula} -> ${config.targetWidth}x${config.targetHeight})`
+          : `9:16 Vertical Latent Lock (${config.targetWidth}x${config.targetHeight})`,
     },
   };
 
@@ -1021,51 +1101,70 @@ export function buildComfyUIWorkflowJSON(
   };
 
   // Node 5: Camera Trajectory & Character Pacing Controller
-  workflow['5'] = {
-    class_type: isLTX
-      ? 'LTXVConditioningCameraController'
-      : 'AnimateDiffCameraPacingController',
-    inputs: {
-      model: ['4', 0],
-      fps: config.fps,
-      ...(isLTX
-        ? {
-            stg_scale: config.ltxStgScale ?? 1.4,
-            stg_rescale: config.ltxRescale ?? 0.7,
-            t5_prompts: resolvedBeats.map((b) => compileLocalLTXVMotionPrompt(b)),
-          }
-        : {}),
-      scene_trajectories: resolvedBeats.map((b) => ({
-        scene: b.sceneNumber,
-        start_frame: b.startFrame,
-        end_frame: b.endFrame,
-        camera_curve: b.cameraCurve,
-        pacing_profile: b.pacing,
-        sprite_layout: b.inferredLayout,
-        active_char: b.matchedCharacter?.label || 'NONE',
-        active_pose: b.activePose,
-        active_style: b.matchedLoRA?.styleTag || 'DEFAULT',
-      })),
-    },
-    _meta: {
-      title: isLTX
-        ? 'LTXV Spatiotemporal & Camera Pacing Controller'
-        : 'Camera Movement & Character Pacing Sequencer',
-    },
-  };
+  // Uses the installed AnimateDiffCameraPacingController (verified MODEL -> MODEL schema).
+  // If /object_info reports AnimateDiffCameraPacingController is not installed, safely bypasses Node 5
+  // and connects Node 6 directly to Node 4's MODEL output.
+  const cameraControllerInstalled =
+    !installedSet || installedSet.has('AnimateDiffCameraPacingController');
+
+  let conditioningSourceNodeId = '5';
+  if (cameraControllerInstalled) {
+    workflow['5'] = {
+      class_type: 'AnimateDiffCameraPacingController',
+      inputs: {
+        model: ['4', 0],
+        fps: config.fps,
+        ...(isLTX
+          ? {
+              stg_scale: config.ltxStgScale ?? 1.4,
+              stg_rescale: config.ltxRescale ?? 0.7,
+              t5_prompts: resolvedBeats.map((b) =>
+                compileLocalLTXVMotionPrompt(b)
+              ),
+            }
+          : {}),
+        scene_trajectories: resolvedBeats.map((b) => ({
+          scene: b.sceneNumber,
+          start_frame: b.startFrame,
+          end_frame: b.endFrame,
+          camera_curve: b.cameraCurve,
+          pacing_profile: b.pacing,
+          sprite_layout: b.inferredLayout,
+          active_char: b.matchedCharacter?.label || 'NONE',
+          active_pose: b.activePose,
+          active_style: b.matchedLoRA?.styleTag || 'DEFAULT',
+        })),
+      },
+      _meta: {
+        title: isLTX
+          ? 'LTXV Spatiotemporal & Camera Pacing Controller'
+          : 'Camera Movement & Character Pacing Sequencer',
+      },
+    };
+  } else {
+    conditioningSourceNodeId = '4';
+    fallbacksApplied.push(
+      'Node #5: AnimateDiffCameraPacingController not installed in /object_info; bypassed Node #5 and linked Node #6 (VertiNodeSilentVisemeLipSync) directly to Node #4 (MODEL output).'
+    );
+  }
 
   // Node 6: Silent Viseme Lip-Sync Synthesizer (Driven by Subtitle Phonemes, Zero Audio)
   workflow['6'] = {
     class_type: 'VertiNodeSilentVisemeLipSync',
     inputs: {
-      conditioning_model: ['5', 0],
+      conditioning_model: [conditioningSourceNodeId, 0],
       enabled: config.silentLipSyncEnabled,
       audio_mode: 'SILENT_SUBTITLE_PHONEME_DRIVEN',
       fps: config.fps,
       viseme_tracks: resolvedBeats.map((b) => ({
         scene: b.sceneNumber,
         character_label: b.matchedCharacter?.label || 'CHAR_UNKNOWN',
-        mouth_roi: b.matchedCharacter?.lipSyncRegion || { x: 460, y: 520, w: 160, h: 110 },
+        mouth_roi: b.matchedCharacter?.lipSyncRegion || {
+          x: 460,
+          y: 520,
+          w: 160,
+          h: 110,
+        },
         cues: b.visemeTimeline.slice(0, 12),
       })),
     },
@@ -1074,17 +1173,19 @@ export function buildComfyUIWorkflowJSON(
     },
   };
 
-  // Node 7: KSampler / LTXVSamplerCustom Batch Processor
+  // Node 7: Installed KSampler with verified input/output schema
   workflow['7'] = {
-    class_type: isLTX ? 'LTXVSamplerCustom' : 'KSampler',
+    class_type: 'KSampler',
     inputs: {
       model: ['6', 0],
+      positive: [conditioningSourceNodeId, 0],
+      negative: [conditioningSourceNodeId, 0],
       latent_image: ['2', 0],
       seed: 84920411,
       steps: config.steps,
       cfg: config.cfg,
       sampler_name: config.sampler,
-      scheduler: isLTX ? 'ltxv_shift_sigmas' : 'karras',
+      scheduler: isLTX ? 'normal' : 'karras',
       ...(isLTX
         ? {
             max_shift: 2.05,
@@ -1095,7 +1196,9 @@ export function buildComfyUIWorkflowJSON(
       denoise: 1.0,
     },
     _meta: {
-      title: isLTX ? 'LTX-Video Spatiotemporal Sampler' : 'Batch Episode KSampler',
+      title: isLTX
+        ? 'LTX-Video Spatiotemporal KSampler'
+        : 'Batch Episode KSampler',
     },
   };
 
@@ -1122,7 +1225,173 @@ export function buildComfyUIWorkflowJSON(
     },
   };
 
-  return workflow;
+  // Populate any additional required inputs reported by live /object_info nodeSchemas
+  for (const node of Object.values(workflow)) {
+    const schema = schemas[node.class_type];
+    if (!schema) continue;
+    for (const reqKey of schema.requiredInputs) {
+      if (
+        !(reqKey in node.inputs) ||
+        node.inputs[reqKey] === undefined ||
+        node.inputs[reqKey] === null
+      ) {
+        if (reqKey in schema.inputDefaults) {
+          node.inputs[reqKey] = schema.inputDefaults[reqKey];
+        }
+      }
+    }
+  }
+
+  return { workflow, fallbacksApplied };
+}
+
+/**
+ * Generates an importable ComfyUI API Workflow JSON.
+ */
+export function buildComfyUIWorkflowJSON(
+  config: PipelineConfig,
+  resolvedBeats: ResolvedBeat[],
+  characters: CharacterSheet[],
+  loras: StyleLoRA[],
+  installedObjectInfo?: ComfyObjectInfoResponse | null
+): Record<string, ComfyNode> {
+  return buildComfyUIWorkflowWithFallbacks(
+    config,
+    resolvedBeats,
+    characters,
+    loras,
+    installedObjectInfo
+  ).workflow;
+}
+
+/**
+ * Validates a ComfyUI API-format workflow JSON against the connected ComfyUI `/object_info`
+ * response, verifying that every node class exists, all required inputs in `/object_info`
+ * are present, and all internal node links reference valid node IDs.
+ */
+export function validateWorkflowAgainstObjectInfo(
+  workflow: Record<string, ComfyNode>,
+  objectInfo: ComfyObjectInfoResponse | null | undefined,
+  fallbacksApplied: string[] = []
+): WorkflowObjectInfoValidationResult {
+  const nodeEntries = Object.entries(workflow);
+  if (!objectInfo || !objectInfo.connected) {
+    return {
+      verified: false,
+      canSubmitQueue: false,
+      checkedNodeCount: nodeEntries.length,
+      missingClasses: [],
+      invalidInputs: [],
+      issues: [],
+      fallbacksApplied,
+      summary:
+        'Workflow not yet validated against live ComfyUI /object_info. Click "Check Installed Nodes" to verify node classes and required inputs before queue submission.',
+    };
+  }
+
+  const installedSet = new Set(objectInfo.installedNodes);
+  const schemas = objectInfo.nodeSchemas ?? {};
+  const missingClassesSet = new Set<string>();
+  const invalidInputs: Array<{
+    nodeId: string;
+    classType: string;
+    missingRequiredInputs: string[];
+  }> = [];
+  const issues: WorkflowValidationIssue[] = [];
+
+  for (const [nodeId, node] of nodeEntries) {
+    if (!installedSet.has(node.class_type)) {
+      missingClassesSet.add(node.class_type);
+      issues.push({
+        nodeId,
+        classType: node.class_type,
+        issueType: 'missing_node_class',
+        details: `Node #${nodeId} requires class "${node.class_type}", which is not installed in ComfyUI /object_info.`,
+      });
+      continue;
+    }
+
+    // Check internal link references [sourceNodeId, outputIdx]
+    for (const [inputName, inputVal] of Object.entries(node.inputs)) {
+      if (
+        Array.isArray(inputVal) &&
+        inputVal.length === 2 &&
+        typeof inputVal[0] === 'string' &&
+        typeof inputVal[1] === 'number'
+      ) {
+        const targetNodeId = inputVal[0];
+        if (!workflow[targetNodeId]) {
+          issues.push({
+            nodeId,
+            classType: node.class_type,
+            issueType: 'incompatible_link',
+            details: `Node #${nodeId} (${node.class_type}) input "${inputName}" links to non-existent Node #${targetNodeId}.`,
+          });
+        }
+      }
+    }
+
+    const schema = schemas[node.class_type];
+    if (schema && schema.requiredInputs.length > 0) {
+      const missingReq = schema.requiredInputs.filter((reqKey) => {
+        if (!(reqKey in node.inputs)) return true;
+        const val = node.inputs[reqKey];
+        return val === undefined || val === null || val === '';
+      });
+      if (missingReq.length > 0) {
+        invalidInputs.push({
+          nodeId,
+          classType: node.class_type,
+          missingRequiredInputs: missingReq,
+        });
+        issues.push({
+          nodeId,
+          classType: node.class_type,
+          issueType: 'missing_required_input',
+          missingInputs: missingReq,
+          details: `Node #${nodeId} (${node.class_type}) is missing required inputs defined in /object_info: ${missingReq.join(', ')}.`,
+        });
+      }
+    }
+  }
+
+  const missingClasses = Array.from(missingClassesSet);
+  const canSubmitQueue =
+    missingClasses.length === 0 &&
+    invalidInputs.length === 0 &&
+    issues.length === 0;
+
+  let summary = '';
+  if (canSubmitQueue) {
+    summary =
+      fallbacksApplied.length > 0
+        ? `All ${nodeEntries.length} workflow nodes and required inputs verified against /object_info (${fallbacksApplied.length} fallback applied). Ready for queue submission.`
+        : `All ${nodeEntries.length} workflow nodes and required inputs verified against live ComfyUI /object_info. Ready for queue submission.`;
+  } else {
+    const parts: string[] = [];
+    if (missingClasses.length > 0) {
+      parts.push(`Missing node classes (${missingClasses.length}): ${missingClasses.join(', ')}`);
+    }
+    if (invalidInputs.length > 0) {
+      parts.push(
+        `Missing required inputs on ${invalidInputs
+          .map((i) => `${i.classType} [${i.missingRequiredInputs.join(', ')}]`)
+          .join('; ')}`
+      );
+    }
+    summary = `Queue submission blocked by /object_info validation: ${parts.join(' | ')}`;
+  }
+
+  return {
+    verified: true,
+    canSubmitQueue,
+    checkedNodeCount: nodeEntries.length,
+    missingClasses,
+    invalidInputs,
+    issues,
+    fallbacksApplied,
+    summary,
+  };
 }
 
 /**
@@ -1387,7 +1656,7 @@ export const INITIAL_PIPELINE_CONFIG: PipelineConfig = {
   projectName: 'Chronicles of the Sovereign Ring',
   episodeCode: 'EP01_THE_CORTEX_SEAL',
   genre: 'Cyberpunk',
-  checkpointName: 'ltx-video-2b-v0.9.5.safetensors',
+  checkpointName: '10Eros_v15.gguf',
   architecture: 'LTX-Video',
   targetWidth: 1080,
   targetHeight: 1920,

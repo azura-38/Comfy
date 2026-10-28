@@ -244,7 +244,7 @@ export default function App() {
     scriptText: string,
     genre?: GenreSetting
   ) => {
-    const parsed = autoParseRawStoryboardBlock(scriptText, 180);
+    const parsed = autoParseRawStoryboardBlock(scriptText, characters, loras);
     if (parsed.length === 0) return;
     setBeats(parsed);
     setSelectedBeatId(parsed[0].id);

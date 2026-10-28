@@ -7,6 +7,8 @@ import {
   resolveSceneGraphMapping,
   computeCameraMotionAtFrame,
   buildComfyUIWorkflowJSON,
+  buildComfyUIWorkflowWithFallbacks,
+  validateWorkflowAgainstObjectInfo,
   exportFrameSyncedSubtitlesSRT,
   parseCharacterSpreadsheetCSV,
   inferPoseAndSpriteLayoutFromNarrative,
@@ -23,6 +25,14 @@ import {
   INITIAL_STORYBOARD_BEATS,
   INITIAL_PIPELINE_CONFIG,
 } from './workflowEngine';
+import {
+  validateComfyBaseUrl,
+  parseRequiredNodesParam,
+  fetchComfyStatus,
+  fetchComfyQueue,
+  fetchComfyObjectInfo,
+  FetchLike,
+} from './comfyApiClient';
 
 test('getSceneThumbnailGradientSpec returns deterministic gradient classes per scene index', () => {
   const g0 = getSceneThumbnailGradientSpec(0);
@@ -150,7 +160,7 @@ test('computeCameraMotionAtFrame computes deterministic camera trajectories', ()
   assert.ok(end.offsetY < start.offsetY);
 });
 
-test('buildComfyUIWorkflowJSON outputs valid ComfyUI API graph with latent 9:16 lock and silent lip-sync node', () => {
+test('buildComfyUIWorkflowJSON outputs valid ComfyUI API graph with LTXV23ModelsLoader, AnimateDiffCameraPacingController, and KSampler', () => {
   const { resolvedBeats } = resolveSceneGraphMapping(
     INITIAL_STORYBOARD_BEATS,
     INITIAL_CHARACTERS,
@@ -164,10 +174,20 @@ test('buildComfyUIWorkflowJSON outputs valid ComfyUI API graph with latent 9:16 
     INITIAL_LORAS
   );
 
+  const classTypes = Object.values(workflow).map((n) => n.class_type);
+  assert.equal(workflow['1'].class_type, 'LTXV23ModelsLoader');
+  assert.equal(workflow['1'].inputs.model_name, '10Eros_v15.gguf');
   assert.equal(workflow['2'].inputs.width, 1080);
   assert.equal(workflow['2'].inputs.height, 1920);
+  assert.equal(workflow['5'].class_type, 'AnimateDiffCameraPacingController');
   assert.equal(workflow['6'].class_type, 'VertiNodeSilentVisemeLipSync');
+  assert.equal(workflow['7'].class_type, 'KSampler');
   assert.equal(workflow['8'].inputs.audio_track, 'NONE_SILENT_DRAMA');
+
+  // Verify obsolete/assumed missing node class names are never emitted
+  assert.equal(classTypes.includes('LTXVLoader'), false);
+  assert.equal(classTypes.includes('LTXVConditioningCameraController'), false);
+  assert.equal(classTypes.includes('LTXVSamplerCustom'), false);
 });
 
 test('exportFrameSyncedSubtitlesSRT and parseCharacterSpreadsheetCSV roundtrip cleanly', () => {
@@ -189,3 +209,496 @@ CHAR_ARIA,Aria Nocturne,Shadow Weaver,Fantasy,1080,1920,aria_nocturne_916`;
   assert.equal(parsed[0].sheetWidth, 1080);
   assert.equal(parsed[0].sheetHeight, 1920);
 });
+
+test('1. ComfyUI API: successful /system_stats response returns actual fields without inventing data', async () => {
+  const mockSystemStats = {
+    system: {
+      os: 'nt',
+      comfyui_version: '0.3.14',
+      python_version: '3.11.9',
+    },
+    devices: [
+      {
+        name: 'cuda:0 NVIDIA GeForce RTX 4050 Laptop GPU : cudaMallocAsync',
+        type: 'cuda',
+        vram_total: 6441926656,
+        vram_free: 5120000000,
+      },
+    ],
+  };
+
+  const mockFetch: FetchLike = async (url) => {
+    assert.equal(url, 'http://127.0.0.1:8188/system_stats');
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify(mockSystemStats),
+    };
+  };
+
+  const result = await fetchComfyStatus('http://127.0.0.1:8188/', {
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.connected, true);
+  assert.equal(result.baseUrl, 'http://127.0.0.1:8188');
+  assert.equal(result.serverVersion, '0.3.14');
+  assert.equal(result.system?.os, 'nt');
+  assert.equal(result.devices.length, 1);
+  assert.equal(
+    result.devices[0].name,
+    'cuda:0 NVIDIA GeForce RTX 4050 Laptop GPU : cudaMallocAsync'
+  );
+  assert.equal(result.error, undefined);
+});
+
+test('2. ComfyUI API: server unavailable (ECONNREFUSED) reports connected: false and clear error', async () => {
+  const mockFetch: FetchLike = async () => {
+    const err = new Error('fetch failed') as Error & { cause?: { code: string } };
+    err.cause = { code: 'ECONNREFUSED' };
+    throw err;
+  };
+
+  const result = await fetchComfyStatus('http://127.0.0.1:8188', {
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.connected, false);
+  assert.equal(result.serverVersion, null);
+  assert.equal(result.system, null);
+  assert.deepEqual(result.devices, []);
+  assert.ok(result.error?.includes('ECONNREFUSED'));
+});
+
+test('3. ComfyUI API: request timeout reports connected: false and timeout message', async () => {
+  const mockFetch: FetchLike = async (_url, init) => {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const abortErr = new Error('The operation was aborted');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+      });
+    });
+  };
+
+  const result = await fetchComfyStatus('http://127.0.0.1:8188', {
+    timeoutMs: 30,
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.connected, false);
+  assert.ok(result.error?.includes('timed out after 30ms'));
+});
+
+test('4. ComfyUI API: invalid JSON or unexpected payload structure is rejected as connected: false', async () => {
+  const invalidJsonFetch: FetchLike = async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    text: async () => '<html>Not ComfyUI JSON</html>',
+  });
+
+  const res1 = await fetchComfyStatus('http://127.0.0.1:8188', {
+    fetchImpl: invalidJsonFetch,
+  });
+  assert.equal(res1.connected, false);
+  assert.ok(res1.error?.includes('invalid JSON'));
+
+  const unexpectedShapeFetch: FetchLike = async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    text: async () => JSON.stringify({ hello: 'world' }),
+  });
+
+  const res2 = await fetchComfyStatus('http://127.0.0.1:8188', {
+    fetchImpl: unexpectedShapeFetch,
+  });
+  assert.equal(res2.connected, false);
+  assert.ok(res2.error?.includes('missing "system" and "devices"'));
+});
+
+test('5. ComfyUI API: successful /queue response returns actual running and pending queues', async () => {
+  const mockQueuePayload = {
+    queue_running: [[1, 'prompt-id-101', {}]],
+    queue_pending: [
+      [2, 'prompt-id-102', {}],
+      [3, 'prompt-id-103', {}],
+    ],
+  };
+
+  const mockFetch: FetchLike = async (url) => {
+    assert.equal(url, 'http://127.0.0.1:8000/queue');
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify(mockQueuePayload),
+    };
+  };
+
+  const result = await fetchComfyQueue('http://127.0.0.1:8000', {
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(result.connected, true);
+  assert.equal(result.runningCount, 1);
+  assert.equal(result.pendingCount, 2);
+  assert.equal(result.queueRunning.length, 1);
+  assert.equal(result.queuePending.length, 2);
+});
+
+test('6. ComfyUI API: /object_info accurately detects present and missing required nodes and extracts nodeSchemas', async () => {
+  const mockObjectInfo = {
+    KSampler: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          seed: ['INT', { default: 0 }],
+          steps: ['INT', { default: 20 }],
+          cfg: ['FLOAT', { default: 8.0 }],
+          sampler_name: [['euler', 'euler_ancestral'], {}],
+          scheduler: [['normal', 'karras'], {}],
+          positive: ['CONDITIONING'],
+          negative: ['CONDITIONING'],
+          latent_image: ['LATENT'],
+          denoise: ['FLOAT', { default: 1.0 }],
+        },
+      },
+      output: ['LATENT'],
+    },
+    CheckpointLoaderSimple: { input: { required: { ckpt_name: [['model.safetensors'], {}] } }, output: ['MODEL', 'CLIP', 'VAE'] },
+    EmptyLatentImage: { input: { required: { width: ['INT'], height: ['INT'], batch_size: ['INT'] } }, output: ['LATENT'] },
+    LTXV23ModelsLoader: {
+      input: {
+        required: {
+          model_name: [['10Eros_v15.gguf'], {}],
+          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
+        },
+      },
+      output: ['MODEL', 'CLIP', 'VAE'],
+    },
+  };
+
+  const mockFetch: FetchLike = async (url) => {
+    assert.equal(url, 'http://127.0.0.1:8188/object_info');
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify(mockObjectInfo),
+    };
+  };
+
+  const parsedQuery = parseRequiredNodesParam(
+    'KSampler,LTXV23ModelsLoader,VertiNodeSilentVisemeLipSync,EmptyLTXVLatentVideo'
+  );
+  assert.equal(parsedQuery.valid, true);
+
+  const result = await fetchComfyObjectInfo(
+    'http://127.0.0.1:8188',
+    parsedQuery.nodes,
+    { fetchImpl: mockFetch }
+  );
+
+  assert.equal(result.connected, true);
+  assert.equal(result.installedCount, 4);
+  assert.deepEqual(result.presentNodes, ['KSampler', 'LTXV23ModelsLoader']);
+  assert.deepEqual(result.missingNodes, [
+    'VertiNodeSilentVisemeLipSync',
+    'EmptyLTXVLatentVideo',
+  ]);
+  assert.deepEqual(result.nodeSchemas?.LTXV23ModelsLoader?.requiredInputs, [
+    'model_name',
+    'text_encoder',
+  ]);
+  assert.equal(
+    result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.model_name,
+    '10Eros_v15.gguf'
+  );
+});
+
+test('7. ComfyUI API: invalid base URL rejection', async () => {
+  const badProtocol = validateComfyBaseUrl('ftp://127.0.0.1:8188');
+  assert.equal(badProtocol.valid, false);
+  assert.ok(badProtocol.error?.includes('Unsupported protocol'));
+
+  const missingPort = validateComfyBaseUrl('http://127.0.0.1');
+  assert.equal(missingPort.valid, false);
+  assert.ok(missingPort.error?.includes('explicit port number'));
+
+  const embeddedCreds = validateComfyBaseUrl('http://user:pass@127.0.0.1:8188');
+  assert.equal(embeddedCreds.valid, false);
+  assert.ok(embeddedCreds.error?.includes('credentials'));
+
+  const statusWithInvalidUrl = await fetchComfyStatus('not-a-valid-url');
+  assert.equal(statusWithInvalidUrl.connected, false);
+  assert.ok(statusWithInvalidUrl.error?.includes('Invalid COMFYUI_BASE_URL'));
+});
+
+test('8. Workflow /object_info validation verifies all 8 nodes and required inputs for 10Eros + LTXV23ModelsLoader', async () => {
+  const { resolvedBeats } = resolveSceneGraphMapping(
+    INITIAL_STORYBOARD_BEATS,
+    INITIAL_CHARACTERS,
+    INITIAL_LORAS,
+    24
+  );
+
+  const fullObjectInfoPayload = {
+    LTXV23ModelsLoader: {
+      input: {
+        required: {
+          model_name: [['10Eros_v15.gguf'], {}],
+          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
+           custom_gguf_device: [['cuda:0', 'cpu'], { default: 'cuda:0' }],
+        },
+      },
+      output: ['MODEL', 'CLIP', 'VAE'],
+    },
+    EmptyLTXVLatentVideo: {
+      input: {
+        required: {
+          width: ['INT', { default: 768 }],
+          height: ['INT', { default: 1344 }],
+          length: ['INT', { default: 161 }],
+          batch_size: ['INT', { default: 1 }],
+        },
+      },
+      output: ['LATENT'],
+    },
+    VertiNodeDynamicLoRAStack: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          lora_stack: ['STRING'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    VertiNodeCharacterSheetMapper: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          spreadsheet_Lock_width: ['INT'],
+          spreadsheet_Lock_height: ['INT'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    AnimateDiffCameraPacingController: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          fps: ['INT'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    VertiNodeSilentVisemeLipSync: {
+      input: {
+        required: {
+          conditioning_model: ['MODEL'],
+          enabled: ['BOOLEAN'],
+          fps: ['INT'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    KSampler: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          seed: ['INT'],
+          steps: ['INT'],
+          cfg: ['FLOAT'],
+          sampler_name: [['euler_ancestral'], {}],
+          scheduler: [['normal', 'karras'], {}],
+          positive: ['CONDITIONING'],
+          negative: ['CONDITIONING'],
+          latent_image: ['LATENT'],
+          denoise: ['FLOAT'],
+        },
+      },
+      output: ['LATENT'],
+    },
+    VertiNodeSubtitleVideoCombine: {
+      input: {
+        required: {
+          samples: ['LATENT'],
+          frame_rate: ['INT'],
+          subtitle_burn_in: ['BOOLEAN'],
+        },
+      },
+      output: ['STRING'],
+    },
+  };
+
+  const baseWorkflow = buildComfyUIWorkflowJSON(
+    INITIAL_PIPELINE_CONFIG,
+    resolvedBeats,
+    INITIAL_CHARACTERS,
+    INITIAL_LORAS
+  );
+  const requiredNodes = Object.values(baseWorkflow).map((n) => n.class_type);
+
+  const objectInfo = await fetchComfyObjectInfo(
+    'http://127.0.0.1:8188',
+    requiredNodes,
+    {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify(fullObjectInfoPayload),
+      }),
+    }
+  );
+
+  assert.equal(objectInfo.missingNodes.length, 0);
+
+  const { workflow, fallbacksApplied } = buildComfyUIWorkflowWithFallbacks(
+    INITIAL_PIPELINE_CONFIG,
+    resolvedBeats,
+    INITIAL_CHARACTERS,
+    INITIAL_LORAS,
+    objectInfo
+  );
+
+  assert.equal(fallbacksApplied.length, 0);
+  // Verify additional required input from live /object_info schema was populated automatically
+  assert.equal(workflow['1'].inputs.custom_gguf_device, 'cuda:0');
+
+  const validation = validateWorkflowAgainstObjectInfo(
+    workflow,
+    objectInfo,
+    fallbacksApplied
+  );
+  assert.equal(validation.verified, true);
+  assert.equal(validation.canSubmitQueue, true);
+  assert.equal(validation.missingClasses.length, 0);
+  assert.equal(validation.invalidInputs.length, 0);
+});
+
+test('9. Workflow /object_info fallback and missing-input gate behave safely without inventing nodes', async () => {
+  const { resolvedBeats } = resolveSceneGraphMapping(
+    INITIAL_STORYBOARD_BEATS,
+    INITIAL_CHARACTERS,
+    INITIAL_LORAS,
+    24
+  );
+
+  // Simulate an environment where EmptyLTXVLatentVideo and AnimateDiffCameraPacingController are missing,
+  // but EmptyLatentImage and the remaining nodes are installed.
+  const partialObjectInfoPayload = {
+    LTXV23ModelsLoader: {
+      input: { required: { model_name: [['10Eros_v15.gguf'], {}] } },
+      output: ['MODEL'],
+    },
+    EmptyLatentImage: {
+      input: { required: { width: ['INT'], height: ['INT'], batch_size: ['INT'] } },
+      output: ['LATENT'],
+    },
+    VertiNodeDynamicLoRAStack: {
+      input: { required: { model: ['MODEL'], lora_stack: ['STRING'] } },
+      output: ['MODEL'],
+    },
+    VertiNodeCharacterSheetMapper: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          spreadsheet_Lock_width: ['INT'],
+          spreadsheet_Lock_height: ['INT'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    VertiNodeSilentVisemeLipSync: {
+      input: {
+        required: {
+          conditioning_model: ['MODEL'],
+          enabled: ['BOOLEAN'],
+          fps: ['INT'],
+        },
+      },
+      output: ['MODEL'],
+    },
+    KSampler: {
+      input: {
+        required: {
+          model: ['MODEL'],
+          seed: ['INT'],
+          steps: ['INT'],
+          cfg: ['FLOAT'],
+          sampler_name: [['euler_ancestral'], {}],
+          scheduler: [['normal'], {}],
+          positive: ['CONDITIONING'],
+          negative: ['CONDITIONING'],
+          latent_image: ['LATENT'],
+          denoise: ['FLOAT'],
+        },
+      },
+      output: ['LATENT'],
+    },
+    VertiNodeSubtitleVideoCombine: {
+      input: {
+        required: {
+          samples: ['LATENT'],
+          frame_rate: ['INT'],
+          subtitle_burn_in: ['BOOLEAN'],
+        },
+      },
+      output: ['STRING'],
+    },
+  };
+
+  const objectInfo = await fetchComfyObjectInfo(
+    'http://127.0.0.1:8188',
+    ['LTXV23ModelsLoader', 'EmptyLatentImage', 'KSampler'],
+    {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify(partialObjectInfoPayload),
+      }),
+    }
+  );
+
+  const { workflow, fallbacksApplied } = buildComfyUIWorkflowWithFallbacks(
+    INITIAL_PIPELINE_CONFIG,
+    resolvedBeats,
+    INITIAL_CHARACTERS,
+    INITIAL_LORAS,
+    objectInfo
+  );
+
+  // Verify fallbacks were applied and clearly reported
+  assert.equal(fallbacksApplied.length, 2);
+  assert.equal(workflow['2'].class_type, 'EmptyLatentImage');
+  assert.equal(workflow['5'], undefined);
+  assert.deepEqual(workflow['6'].inputs.conditioning_model, ['4', 0]);
+
+  const validation = validateWorkflowAgainstObjectInfo(
+    workflow,
+    objectInfo,
+    fallbacksApplied
+  );
+  assert.equal(validation.canSubmitQueue, true);
+
+  // Verify that if a required link input is removed, validation blocks queue submission
+  delete workflow['7'].inputs.latent_image;
+  const blockedValidation = validateWorkflowAgainstObjectInfo(
+    workflow,
+    objectInfo,
+    fallbacksApplied
+  );
+  assert.equal(blockedValidation.canSubmitQueue, false);
+  assert.equal(blockedValidation.invalidInputs.length, 1);
+  assert.deepEqual(
+    blockedValidation.invalidInputs[0].missingRequiredInputs,
+    ['latent_image']
+  );
+});
+
+

@@ -3,6 +3,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, ThinkingLevel, GenerateContentResponse } from '@google/genai';
+import {
+  fetchComfyStatus,
+  fetchComfyQueue,
+  fetchComfyObjectInfo,
+  parseRequiredNodesParam,
+} from './src/utils/comfyApiClient.ts';
 
 dotenv.config();
 
@@ -10,7 +16,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+/**
+ * Security note:
+ * For local Windows development with ComfyUI Desktop, bind Express to 127.0.0.1 (loopback)
+ * so local diagnostic/workflow endpoints are never exposed to other machines on the LAN.
+ * Only bind to 0.0.0.0 when running inside a managed container environment where APP_URL is injected,
+ * or when explicitly overridden via HOST.
+ */
+const HOST =
+  process.env.HOST ||
+  (process.env.APP_URL && process.env.APP_URL !== 'MY_APP_URL'
+    ? '0.0.0.0'
+    : '127.0.0.1');
 
 app.use(express.json({ limit: '50mb' }));
 
@@ -375,6 +394,46 @@ app.post('/api/gemini/chat', async (req, res) => {
   }
 });
 
+// 9. Local ComfyUI Diagnostic Endpoint: GET /api/comfy/status
+// Queries the server-configured COMFYUI_BASE_URL/system_stats endpoint only (never accepts arbitrary client URLs).
+app.get('/api/comfy/status', async (_req, res) => {
+  const result = await fetchComfyStatus(process.env.COMFYUI_BASE_URL);
+  res.status(200).json(result);
+});
+
+// 10. Local ComfyUI Queue Endpoint: GET /api/comfy/queue
+// Queries the server-configured COMFYUI_BASE_URL/queue endpoint.
+app.get('/api/comfy/queue', async (_req, res) => {
+  const result = await fetchComfyQueue(process.env.COMFYUI_BASE_URL);
+  res.status(200).json(result);
+});
+
+// 11. Local ComfyUI Installed Nodes Endpoint: GET /api/comfy/object-info
+// Queries COMFYUI_BASE_URL/object_info and checks optional ?required=NodeA,NodeB against actual installed nodes.
+app.get('/api/comfy/object-info', async (req, res) => {
+  const parsedReq = parseRequiredNodesParam(req.query.required);
+  if (!parsedReq.valid) {
+    res.status(400).json({
+      connected: false,
+      baseUrl: process.env.COMFYUI_BASE_URL || 'http://127.0.0.1:8188',
+      installedCount: 0,
+      installedNodes: [],
+      requiredNodes: [],
+      presentNodes: [],
+      missingNodes: [],
+      checkedAt: new Date().toISOString(),
+      error: parsedReq.error,
+    });
+    return;
+  }
+
+  const result = await fetchComfyObjectInfo(
+    process.env.COMFYUI_BASE_URL,
+    parsedReq.nodes
+  );
+  res.status(200).json(result);
+});
+
 async function startServer() {
   if (process.env.NODE_ENV === 'production') {
     const distPath = path.join(__dirname, 'dist');
@@ -391,8 +450,8 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`VertiNode Studio server running at http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`VertiNode Studio server running at http://${HOST}:${PORT}`);
   });
 }
 

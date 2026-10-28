@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Cpu,
   Layers,
@@ -8,6 +8,9 @@ import {
   HardDrive,
   CheckCircle2,
   FileCode2,
+  RefreshCw,
+  AlertCircle,
+  Server,
 } from 'lucide-react';
 import {
   PipelineConfig,
@@ -21,11 +24,18 @@ import {
   CameraCurve,
   PacingProfile,
   buildComfyUIWorkflowJSON,
+  buildComfyUIWorkflowWithFallbacks,
+  validateWorkflowAgainstObjectInfo,
   exportFrameSyncedSubtitlesSRT,
   generateComfyUICustomNodesPython,
   snapToLTXVFrameRule,
   estimateLocalLTXVHardwareMetrics,
 } from '../utils/workflowEngine';
+import type {
+  ComfyStatusResponse,
+  ComfyQueueResponse,
+  ComfyObjectInfoResponse,
+} from '../utils/comfyApiClient';
 
 interface ComfyPipelineViewProps {
   config: PipelineConfig;
@@ -49,6 +59,10 @@ const CHECKPOINT_PRESETS: Record<
   Array<{ label: string; filename: string }>
 > = {
   'LTX-Video': [
+    {
+      label: '10Eros v1.5 GGUF (LTXV23ModelsLoader)',
+      filename: '10Eros_v15.gguf',
+    },
     {
       label: 'LTX-Video 2B v0.9.5 Local',
       filename: 'ltx-video-2b-v0.9.5.safetensors',
@@ -106,11 +120,44 @@ export const ComfyPipelineView: React.FC<ComfyPipelineViewProps> = ({
   const [targetEpSec, setTargetEpSec] = useState<number>(180);
   const [codeTab, setCodeTab] = useState<'srt' | 'python'>('srt');
 
-  const workflowGraph = buildComfyUIWorkflowJSON(
+  // Real Local ComfyUI Server Connection Diagnostics State (Never hard-coded or mocked)
+  const [comfyConnected, setComfyConnected] = useState<boolean>(false);
+  const [comfyBaseUrl, setComfyBaseUrl] = useState<string>('http://127.0.0.1:8188');
+  const [comfyLoadingAction, setComfyLoadingAction] = useState<
+    null | 'status' | 'queue' | 'nodes'
+  >(null);
+  const [comfyError, setComfyError] = useState<string | null>(null);
+  const [lastSuccessfulCheckAt, setLastSuccessfulCheckAt] = useState<string | null>(
+    null
+  );
+  const [lastAttemptAt, setLastAttemptAt] = useState<string | null>(null);
+  const [comfyStatusData, setComfyStatusData] =
+    useState<ComfyStatusResponse | null>(null);
+  const [comfyQueueData, setComfyQueueData] =
+    useState<ComfyQueueResponse | null>(null);
+  const [comfyNodeData, setComfyNodeData] =
+    useState<ComfyObjectInfoResponse | null>(null);
+
+  const baseWorkflowGraph = buildComfyUIWorkflowJSON(
     config,
     resolvedBeats,
     characters,
     loras
+  );
+
+  const { workflow: workflowGraph, fallbacksApplied: workflowFallbacks } =
+    buildComfyUIWorkflowWithFallbacks(
+      config,
+      resolvedBeats,
+      characters,
+      loras,
+      comfyNodeData
+    );
+
+  const workflowValidation = validateWorkflowAgainstObjectInfo(
+    workflowGraph,
+    comfyNodeData,
+    workflowFallbacks
   );
 
   const srtPreview = exportFrameSyncedSubtitlesSRT(resolvedBeats, config.fps);
@@ -125,6 +172,126 @@ export const ComfyPipelineView: React.FC<ComfyPipelineViewProps> = ({
     totalEpisodeFrames
   );
   const ltxFrameCheck = snapToLTXVFrameRule(config.ltxChunkFrames || 161);
+
+  const handleTestComfyConnection = async () => {
+    setComfyLoadingAction('status');
+    setComfyError(null);
+    try {
+      const resp = await fetch('/api/comfy/status');
+      const data: ComfyStatusResponse = await resp.json();
+      if (data.baseUrl) {
+        setComfyBaseUrl(data.baseUrl);
+      }
+      setLastAttemptAt(data.checkedAt || new Date().toISOString());
+      setComfyStatusData(data);
+
+      if (resp.ok && data.connected) {
+        setComfyConnected(true);
+        setLastSuccessfulCheckAt(data.checkedAt);
+        setComfyError(null);
+      } else {
+        setComfyConnected(false);
+        setComfyError(
+          data.error ||
+            `Could not connect to ComfyUI at ${data.baseUrl || comfyBaseUrl}.`
+        );
+      }
+    } catch (err: unknown) {
+      setComfyConnected(false);
+      setLastAttemptAt(new Date().toISOString());
+      setComfyError(
+        err instanceof Error
+          ? `Failed to query /api/comfy/status: ${err.message}`
+          : 'Failed to query /api/comfy/status.'
+      );
+    } finally {
+      setComfyLoadingAction(null);
+    }
+  };
+
+  const handleRefreshComfyQueue = async () => {
+    setComfyLoadingAction('queue');
+    setComfyError(null);
+    try {
+      const resp = await fetch('/api/comfy/queue');
+      const data: ComfyQueueResponse = await resp.json();
+      if (data.baseUrl) {
+        setComfyBaseUrl(data.baseUrl);
+      }
+      setLastAttemptAt(data.checkedAt || new Date().toISOString());
+      setComfyQueueData(data);
+
+      if (resp.ok && data.connected) {
+        setComfyConnected(true);
+        setLastSuccessfulCheckAt(data.checkedAt);
+        setComfyError(null);
+      } else {
+        setComfyConnected(false);
+        setComfyError(
+          data.error ||
+            `Could not fetch queue from ComfyUI at ${data.baseUrl || comfyBaseUrl}.`
+        );
+      }
+    } catch (err: unknown) {
+      setComfyConnected(false);
+      setLastAttemptAt(new Date().toISOString());
+      setComfyError(
+        err instanceof Error
+          ? `Failed to query /api/comfy/queue: ${err.message}`
+          : 'Failed to query /api/comfy/queue.'
+      );
+    } finally {
+      setComfyLoadingAction(null);
+    }
+  };
+
+  const handleCheckInstalledNodes = async () => {
+    setComfyLoadingAction('nodes');
+    setComfyError(null);
+    try {
+      const requiredList = Array.from(
+        new Set(Object.values(baseWorkflowGraph).map((n) => n.class_type))
+      );
+      const query = encodeURIComponent(requiredList.join(','));
+      const resp = await fetch(`/api/comfy/object-info?required=${query}`);
+      const data: ComfyObjectInfoResponse = await resp.json();
+      if (data.baseUrl) {
+        setComfyBaseUrl(data.baseUrl);
+      }
+      setLastAttemptAt(data.checkedAt || new Date().toISOString());
+      setComfyNodeData(data);
+
+      if (resp.ok && data.connected) {
+        setComfyConnected(true);
+        setLastSuccessfulCheckAt(data.checkedAt);
+        setComfyError(null);
+      } else {
+        setComfyConnected(false);
+        setComfyError(
+          data.error ||
+            `Could not query /object_info from ComfyUI at ${
+              data.baseUrl || comfyBaseUrl
+            }.`
+        );
+      }
+    } catch (err: unknown) {
+      setComfyConnected(false);
+      setLastAttemptAt(new Date().toISOString());
+      setComfyError(
+        err instanceof Error
+          ? `Failed to query /api/comfy/object-info: ${err.message}`
+          : 'Failed to query /api/comfy/object-info.'
+      );
+    } finally {
+      setComfyLoadingAction(null);
+    }
+  };
+
+  // Run an initial connection check on mount so the user sees the real status immediately
+  useEffect(() => {
+    void handleTestComfyConnection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleDownloadPythonNodes = () => {
     const blob = new Blob([pythonCustomNodes], {
@@ -207,6 +374,248 @@ export const ComfyPipelineView: React.FC<ComfyPipelineViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Row 0: Real Local ComfyUI Server Connection & Diagnostics Panel */}
+      <div
+        data-testid="comfy-connection-panel"
+        className="bg-[#111724] border border-slate-800/80 rounded-xl p-5 space-y-4"
+      >
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <Server className="w-4 h-4 text-amber-400 shrink-0" />
+              <h2 className="text-base font-semibold text-slate-100">
+                Local ComfyUI Desktop Connection Diagnostics
+              </h2>
+              <span aria-hidden="true" className="text-slate-600">
+                ·
+              </span>
+              <span
+                data-testid="comfy-connection-status"
+                className={`font-mono text-xs font-semibold ${
+                  comfyConnected ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                {comfyConnected ? 'Connected' : 'Disconnected'}
+              </span>
+              <span aria-hidden="true" className="text-slate-600">
+                ·
+              </span>
+              <span
+                data-testid="comfy-base-url"
+                className="font-mono text-xs text-slate-300"
+              >
+                Base URL: {comfyBaseUrl}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums text-slate-400">
+              <span data-testid="comfy-last-success">
+                Last Successful Check:{' '}
+                {lastSuccessfulCheckAt
+                  ? new Date(lastSuccessfulCheckAt).toLocaleTimeString()
+                  : 'Never'}
+              </span>
+              {lastAttemptAt && (
+                <>
+                  <span aria-hidden="true" className="text-slate-600">
+                    ·
+                  </span>
+                  <span>
+                    Last Attempt: {new Date(lastAttemptAt).toLocaleTimeString()}
+                  </span>
+                </>
+              )}
+              {comfyStatusData?.serverVersion && (
+                <>
+                  <span aria-hidden="true" className="text-slate-600">
+                    ·
+                  </span>
+                  <span className="text-emerald-300">
+                    ComfyUI v{comfyStatusData.serverVersion}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Diagnostic Actions */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleTestComfyConnection}
+              disabled={comfyLoadingAction !== null}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${
+                  comfyLoadingAction === 'status' ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {comfyLoadingAction === 'status'
+                  ? 'Testing Connection...'
+                  : 'Test Connection'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleRefreshComfyQueue}
+              disabled={comfyLoadingAction !== null}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-mono text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${
+                  comfyLoadingAction === 'queue' ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {comfyLoadingAction === 'queue'
+                  ? 'Refreshing Queue...'
+                  : 'Refresh Queue'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleCheckInstalledNodes}
+              disabled={comfyLoadingAction !== null}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-mono text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${
+                  comfyLoadingAction === 'nodes' ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {comfyLoadingAction === 'nodes'
+                  ? 'Checking Nodes...'
+                  : 'Check Installed Nodes'}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Readable Error Display when Disconnected / Request Fails */}
+        {comfyError && (
+          <div
+            role="alert"
+            data-testid="comfy-error-banner"
+            className="p-3 rounded-lg bg-rose-950/40 border border-rose-500/40 flex items-start gap-2.5 text-xs text-rose-200 font-mono"
+          >
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div>{comfyError}</div>
+              <div className="text-[11px] text-slate-400">
+                Set <code className="text-amber-300">COMFYUI_BASE_URL</code> in your{' '}
+                <code className="text-amber-300">.env</code> file to match your
+                running ComfyUI Desktop port (for example,{' '}
+                <code className="text-slate-200">http://127.0.0.1:8188</code> or{' '}
+                <code className="text-slate-200">http://127.0.0.1:8000</code>).
+                Offline editing and workflow export remain active while
+                disconnected.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Live Telemetry from Actual ComfyUI Responses (Only shown when returned by server) */}
+        {(comfyStatusData?.connected ||
+          comfyQueueData?.connected ||
+          comfyNodeData) && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 border-t border-slate-800/80 text-xs font-mono">
+            {/* System & Devices */}
+            <div className="p-3 rounded-lg bg-[#0B0F17] border border-slate-800/90 space-y-1">
+              <div className="text-slate-400">System & Devices (/system_stats)</div>
+              {comfyStatusData?.connected ? (
+                <div className="text-slate-200 space-y-0.5">
+                  <div>
+                    OS: {String(comfyStatusData.system?.os ?? 'Reported by ComfyUI')}
+                  </div>
+                  <div>
+                    Devices Returned: {comfyStatusData.devices.length}
+                    {comfyStatusData.devices[0]?.name
+                      ? ` (${String(comfyStatusData.devices[0].name)})`
+                      : ''}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-slate-500">
+                  No live /system_stats data available.
+                </div>
+              )}
+            </div>
+
+            {/* Live Queue */}
+            <div className="p-3 rounded-lg bg-[#0B0F17] border border-slate-800/90 space-y-1">
+              <div className="text-slate-400">Live ComfyUI Queue (/queue)</div>
+              {comfyQueueData?.connected ? (
+                <div className="text-slate-200 space-y-0.5 tabular-nums">
+                  <div>Running Jobs: {comfyQueueData.runningCount}</div>
+                  <div>Pending Jobs: {comfyQueueData.pendingCount}</div>
+                </div>
+              ) : (
+                <div className="text-slate-500">
+                  Click &ldquo;Refresh Queue&rdquo; when connected.
+                </div>
+              )}
+            </div>
+
+            {/* Installed vs Missing Nodes */}
+            <div className="p-3 rounded-lg bg-[#0B0F17] border border-slate-800/90 space-y-1">
+              <div className="text-slate-400">
+                Installed Nodes (/object_info)
+              </div>
+              {comfyNodeData?.connected ? (
+                <div className="text-slate-200 space-y-0.5">
+                  <div>Total Installed Classes: {comfyNodeData.installedCount}</div>
+                  <div
+                    className={
+                      comfyNodeData.missingNodes.length > 0
+                        ? 'text-amber-300'
+                        : 'text-emerald-400'
+                    }
+                  >
+                    Missing Required Nodes ({comfyNodeData.missingNodes.length}):{' '}
+                    {comfyNodeData.missingNodes.length > 0
+                      ? comfyNodeData.missingNodes.join(', ')
+                      : 'None'}
+                  </div>
+                  <div
+                    className={
+                      workflowValidation.canSubmitQueue
+                        ? 'text-emerald-400'
+                        : 'text-amber-300'
+                    }
+                  >
+                    Schema Validation:{' '}
+                    {workflowValidation.canSubmitQueue
+                      ? 'All node classes & required inputs verified'
+                      : workflowValidation.summary}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-slate-500">
+                  {comfyNodeData && !comfyNodeData.connected
+                    ? `Unverified (${comfyNodeData.missingNodes.length} required nodes unchecked while offline)`
+                    : 'Click "Check Installed Nodes" to verify node classes.'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {workflowFallbacks.length > 0 && (
+          <div className="p-3 rounded-lg bg-amber-950/30 border border-amber-500/40 text-xs font-mono text-amber-200 space-y-1">
+            <div className="font-semibold text-amber-300">
+              Active /object_info Fallbacks Applied ({workflowFallbacks.length}):
+            </div>
+            {workflowFallbacks.map((msg, idx) => (
+              <div key={idx}>{msg}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Row 1: Local Base Model Checkpoint & Latent Frame Lock Config */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         <div className="lg:col-span-5 bg-[#111724] border border-slate-800/80 rounded-xl p-5 flex flex-col justify-between space-y-4">
@@ -774,14 +1183,33 @@ export const ComfyPipelineView: React.FC<ComfyPipelineViewProps> = ({
               Queue multiple 2-to-5 minute vertical episodes for unattended local
               GPU generation with zero cloud storage dependencies.
             </p>
+            <p
+              className={`text-[11px] font-mono mt-1 ${
+                workflowValidation.canSubmitQueue
+                  ? 'text-emerald-400'
+                  : 'text-amber-300'
+              }`}
+            >
+              {workflowValidation.summary}
+            </p>
           </div>
           <button
             type="button"
+            disabled={!workflowValidation.canSubmitQueue}
+            title={workflowValidation.summary}
             onClick={onRunBatchQueue}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-lg font-semibold text-xs transition-colors whitespace-nowrap shrink-0 ${
+              workflowValidation.canSubmitQueue
+                ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                : 'bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-700'
+            }`}
           >
             <Play className="w-3.5 h-3.5" />
-            <span>Advance Local Batch Render</span>
+            <span>
+              {workflowValidation.canSubmitQueue
+                ? 'Advance Local Batch Render'
+                : 'Queue Gate: Verify /object_info First'}
+            </span>
           </button>
         </div>
 
