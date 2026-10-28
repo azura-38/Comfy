@@ -133,7 +133,7 @@ test('storyboard character matching resolves aliases as whole words and avoids r
     []
   );
   assert.deepEqual(
-    findMentionedCharacterLabels('The word kael appears inside the unrelated word kaleidoscope.', characters),
+    findMentionedCharacterLabels('The word kaleidoscope appears inside unrelated text.', characters),
     []
   );
 
