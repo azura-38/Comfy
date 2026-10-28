@@ -35,6 +35,7 @@ export interface CharacterSheet {
   id: string;
   label: string; // e.g., "CHAR_KAEL"
   displayName: string;
+  aliases?: string[]; // Additional names used to detect this character in storyboards
   role: string;
   genre: GenreSetting;
   sheetWidth: number;
@@ -46,7 +47,11 @@ export interface CharacterSheet {
   palettePrimary: string;
   paletteAccent: string;
   poses: CharacterPoseSprite[];
+  /** Local source image/sprite sheet. Pose crops reference regions in this image. */
   customImageUrl?: string;
+  spriteSheetFileName?: string;
+  spriteSheetWidth?: number;
+  spriteSheetHeight?: number;
 }
 
 export interface StyleLoRA {
@@ -176,6 +181,79 @@ export function parseStoryboardLabels(rawText: string): {
   }
 
   return { characters, styles, poses, cameras };
+}
+
+/** Normalize names consistently, including accented Latin characters. */
+function normalizeCharacterMatchText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\\u0300-\\u036f]/g, '')
+    .toLocaleLowerCase()
+    .trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value
+    .split('')
+    .map((char) => '.*+?^{}()|[]\\\\'.includes(char) ? '\\\\' + char : char)
+    .join('');
+}
+
+/**
+ * Finds characters mentioned in ordinary storyboard prose. Explicit [CHAR_*]
+ * tags remain first; recognized names/aliases follow in their order of mention.
+ * Word boundaries prevent short names from matching inside unrelated words.
+ */
+export function findMentionedCharacterLabels(
+  rawText: string,
+  characters: CharacterSheet[],
+  explicitLabels: string[] = []
+): string[] {
+  const labels = [...new Set(explicitLabels)];
+  const text = normalizeCharacterMatchText(rawText);
+  const mentions: Array<{ label: string; index: number; characterOrder: number }> = [];
+
+  characters.forEach((character, characterOrder) => {
+    if (labels.includes(character.label)) return;
+
+    const candidates = [
+      character.displayName,
+      character.displayName.split(/\\s+/)[0],
+      character.label,
+      character.label.replace(/^CHAR_/i, '').replace(/_/g, ' '),
+      ...(character.aliases || []),
+    ]
+      .map(normalizeCharacterMatchText)
+      .filter((name, index, all) => name.length >= 3 && all.indexOf(name) === index);
+
+    let firstIndex = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const pattern = candidate
+        .split(/\\s+/)
+        .map(escapeRegExp)
+        .join('\\s+');
+      const expression = new RegExp(
+        '(^|[^\\\\p{L}\\\\p{N}_])(' + pattern + ')(?=$|[^\\\\p{L}\\\\p{N}_])',
+        'iu'
+      );
+      const match = expression.exec(text);
+      if (match) {
+        firstIndex = Math.min(firstIndex, match.index + match[1].length);
+      }
+    }
+
+    if (Number.isFinite(firstIndex)) {
+      mentions.push({ label: character.label, index: firstIndex, characterOrder });
+    }
+  });
+
+  mentions
+    .sort((a, b) => a.index - b.index || a.characterOrder - b.characterOrder)
+    .forEach((mention) => {
+      if (!labels.includes(mention.label)) labels.push(mention.label);
+    });
+
+  return labels.filter((label, index) => labels.indexOf(label) === index);
 }
 
 /**
@@ -413,25 +491,16 @@ export function resolveSceneGraphMapping(
     cursorFrame += beatFrames;
     totalDurationSec += beat.durationSec;
 
-    // Also match character display names or short label names in narrative if user didn't bracket them
-    const narrativeUpper = beat.rawNarrative.toUpperCase();
-    const detectedCharLabels = [...parsed.characters];
-    for (const c of characters) {
-      const shortName = c.label.replace(/^CHAR_/, '').toUpperCase();
-      const firstName = c.displayName.split(' ')[0].toUpperCase();
-      if (
-        !detectedCharLabels.includes(c.label) &&
-        (narrativeUpper.includes(c.label) ||
-          (shortName.length >= 3 && narrativeUpper.includes(shortName)) ||
-          (firstName.length >= 3 && narrativeUpper.includes(firstName)))
-      ) {
-        detectedCharLabels.push(c.label);
-      }
-    }
+    // Resolve explicit tags first, then full names and user-defined aliases in narrative prose.
+    const detectedCharLabels = findMentionedCharacterLabels(
+      beat.rawNarrative,
+      characters,
+      parsed.characters
+    );
 
     const primaryCharLabel = detectedCharLabels[0] || '';
     const matchedCharacter =
-      characters.find((c) => c.label === primaryCharLabel) || characters[0] || null;
+      characters.find((c) => c.label === primaryCharLabel) || null;
 
     const secondaryCharLabel = detectedCharLabels[1] || '';
     const secondaryCharacter = secondaryCharLabel
@@ -558,21 +627,26 @@ export function autoParseRawStoryboardBlock(
       .trim();
 
     const parsedTags = parseStoryboardLabels(block);
+    const identifiedCharacterLabels = findMentionedCharacterLabels(
+      block,
+      characters,
+      parsedTags.characters
+    );
     const inference = inferPoseAndSpriteLayoutFromNarrative(
       block,
-      parsedTags.characters.length || 1,
+      identifiedCharacterLabels.length || 1,
       parsedTags.poses
     );
 
-    // Ensure at least one [CHAR_*] and [STYLE_*] tag is present in rawNarrative
+    // Only add a character label when the storyboard actually names a character.
+    // Do not silently assign an unrelated library entry to a location-only scene.
     let enrichedNarrative = narrativeLine;
     if (parsedTags.characters.length === 0) {
-      const matchedChar =
-        characters.find((c) =>
-          block.toUpperCase().includes(c.displayName.split(' ')[0].toUpperCase())
-        ) || characters[idx % characters.length];
+      const matchedChar = characters.find(
+        (character) => character.label === identifiedCharacterLabels[0]
+      );
       if (matchedChar) {
-        enrichedNarrative = `[${matchedChar.label}] ${enrichedNarrative}`;
+        enrichedNarrative = '[' + matchedChar.label + '] ' + enrichedNarrative;
       }
     }
     if (parsedTags.styles.length === 0) {
