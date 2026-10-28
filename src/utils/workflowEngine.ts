@@ -28,7 +28,8 @@ export type SpriteLayoutMode =
 export interface CharacterPoseSprite {
   poseLabel: string; // e.g., "POSE_NEUTRAL", "POSE_DRAMATIC", "POSE_SHOCK", "POSE_SIDE"
   description: string;
-  keyframeCrop: string; // e.g., "0,0,1080,1920"
+  keyframeCrop: string; // x,y,width,height in source sprite-sheet pixels
+  cropImageUrl?: string; // persisted local crop used as a clean reference image
 }
 
 export interface CharacterSheet {
