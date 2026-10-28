@@ -185,24 +185,18 @@ export function parseStoryboardLabels(rawText: string): {
 
 /** Normalize names consistently, including accented Latin characters. */
 function normalizeCharacterMatchText(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/[\\u0300-\\u036f]/g, '')
-    .toLocaleLowerCase()
-    .trim();
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
 function escapeRegExp(value: string): string {
   return value
-    .split('')
-    .map((char) => '.*+?^{}()|[]\\\\'.includes(char) ? '\\\\' + char : char)
-    .join('');
+    .replace(/[.*+?^{}()|[\]\\]/g, '\\$&')
+    .replace(/\$/g, '\\$');
 }
 
 /**
- * Finds characters mentioned in ordinary storyboard prose. Explicit [CHAR_*]
- * tags remain first; recognized names/aliases follow in their order of mention.
- * Word boundaries prevent short names from matching inside unrelated words.
+ * Finds character names and aliases as whole words. Explicit tags remain first;
+ * prose mentions are added in the order in which they appear.
  */
 export function findMentionedCharacterLabels(
   rawText: string,
@@ -215,10 +209,9 @@ export function findMentionedCharacterLabels(
 
   characters.forEach((character, characterOrder) => {
     if (labels.includes(character.label)) return;
-
     const candidates = [
       character.displayName,
-      character.displayName.split(/\\s+/)[0],
+      character.displayName.split(/\s+/)[0],
       character.label,
       character.label.replace(/^CHAR_/i, '').replace(/_/g, ' '),
       ...(character.aliases || []),
@@ -228,18 +221,13 @@ export function findMentionedCharacterLabels(
 
     let firstIndex = Number.POSITIVE_INFINITY;
     for (const candidate of candidates) {
-      const pattern = candidate
-        .split(/\\s+/)
-        .map(escapeRegExp)
-        .join('\\s+');
+      const pattern = candidate.split(/\s+/).map(escapeRegExp).join('\\s+');
       const expression = new RegExp(
-        '(^|[^\\\\p{L}\\\\p{N}_])(' + pattern + ')(?=$|[^\\\\p{L}\\\\p{N}_])',
-        'iu'
+        '(^|[^a-z0-9_])(' + pattern + ')(?=$|[^a-z0-9_])',
+        'i'
       );
       const match = expression.exec(text);
-      if (match) {
-        firstIndex = Math.min(firstIndex, match.index + match[1].length);
-      }
+      if (match) firstIndex = Math.min(firstIndex, match.index + match[1].length);
     }
 
     if (Number.isFinite(firstIndex)) {
@@ -253,7 +241,7 @@ export function findMentionedCharacterLabels(
       if (!labels.includes(mention.label)) labels.push(mention.label);
     });
 
-  return labels.filter((label, index) => labels.indexOf(label) === index);
+  return labels;
 }
 
 /**
