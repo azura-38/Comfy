@@ -70,6 +70,9 @@ export const SpriteSheetEditor: React.FC<SpriteSheetEditorProps> = ({ character,
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [editingPoseLabel, setEditingPoseLabel] = useState<string | null>(null);
+  const [editedLabel, setEditedLabel] = useState('');
+  const [editedDescription, setEditedDescription] = useState('');
 
   useEffect(() => {
     setAliasesDraft((character.aliases || []).join(', '));
@@ -191,6 +194,30 @@ export const SpriteSheetEditor: React.FC<SpriteSheetEditorProps> = ({ character,
     setMessage('Saved ' + aliases.length + ' character name aliases.');
   };
 
+  const startEditingPose = (pose: CharacterPoseSprite) => {
+    setEditingPoseLabel(pose.poseLabel);
+    setEditedLabel(pose.poseLabel);
+    setEditedDescription(pose.description);
+  };
+
+  const saveEditedPose = (oldLabel: string) => {
+    const clean = slug(editedLabel);
+    const label = clean.startsWith('POSE_') ? clean : 'POSE_' + (clean || 'CUSTOM');
+    const alreadyUsed = character.poses.some((pose) => pose.poseLabel === label && pose.poseLabel !== oldLabel);
+    if (alreadyUsed) {
+      setMessage('That pose label already exists for this character.');
+      return;
+    }
+    const poses = character.poses.map((pose) =>
+      pose.poseLabel === oldLabel
+        ? { ...pose, poseLabel: label, description: editedDescription.trim() || label }
+        : pose
+    );
+    onChange({ ...character, poses });
+    setEditingPoseLabel(null);
+    setMessage('Updated pose label and description.');
+  };
+
   const removePose = (label: string) => onChange({ ...character, poses: character.poses.filter((p) => p.poseLabel !== label) });
 
   return (
@@ -248,7 +275,24 @@ export const SpriteSheetEditor: React.FC<SpriteSheetEditorProps> = ({ character,
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {character.poses.map((pose) => <article key={pose.poseLabel} className="overflow-hidden rounded-lg border border-slate-800 bg-[#0B0F17]">
               {pose.cropImageUrl ? <img src={pose.cropImageUrl} alt={pose.poseLabel} className="h-36 w-full bg-black object-contain" /> : <div className="flex h-36 items-center justify-center text-xs text-slate-600">No crop image</div>}
-              <div className="space-y-1 p-2"><p className="break-words font-mono text-[10px] text-amber-200">{pose.poseLabel}</p><p className="line-clamp-2 text-[10px] text-slate-400">{pose.description}</p><p className="font-mono text-[10px] text-slate-600">{pose.keyframeCrop}</p><button type="button" onClick={() => removePose(pose.poseLabel)} disabled={busy} aria-label={'Remove ' + pose.poseLabel} className="mt-1 inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-400 hover:bg-red-950 hover:text-red-300"><Trash2 className="h-3 w-3" /> Remove</button></div>
+              <div className="space-y-1 p-2">
+                {editingPoseLabel === pose.poseLabel ? (
+                  <div className="space-y-2">
+                    <input aria-label="Edit pose label" value={editedLabel} onChange={(e) => setEditedLabel(e.target.value)} className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-[10px] text-amber-100" />
+                    <input aria-label="Edit pose description" value={editedDescription} onChange={(e) => setEditedDescription(e.target.value)} className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] text-slate-200" />
+                    <button type="button" onClick={() => saveEditedPose(pose.poseLabel)} className="rounded bg-amber-500 px-2 py-1 text-[10px] font-semibold text-slate-950">Save</button>
+                    <button type="button" onClick={() => setEditingPoseLabel(null)} className="ml-1 rounded bg-slate-800 px-2 py-1 text-[10px] text-slate-300">Cancel</button>
+                  </div>
+                ) : (
+                  <>
+                    <p className="break-words font-mono text-[10px] text-amber-200">{pose.poseLabel}</p>
+                    <p className="line-clamp-2 text-[10px] text-slate-400">{pose.description}</p>
+                    <p className="font-mono text-[10px] text-slate-600">{pose.keyframeCrop}</p>
+                    <button type="button" onClick={() => startEditingPose(pose)} disabled={busy} className="mt-1 inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-amber-200 hover:bg-slate-800">Rename / retag</button>
+                    <button type="button" onClick={() => removePose(pose.poseLabel)} disabled={busy} aria-label={'Remove ' + pose.poseLabel} className="mt-1 inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-slate-400 hover:bg-red-950 hover:text-red-300"><Trash2 className="h-3 w-3" /> Remove</button>
+                  </>
+                )}
+              </div>
             </article>)}
           </div>
         )}
