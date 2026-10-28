@@ -1151,11 +1151,23 @@ export function buildComfyUIWorkflowWithFallbacks(
       character_sheets: characters.map((c) => ({
         label: c.label,
         name: c.displayName,
+        aliases: c.aliases || [],
         dimensions: `${c.sheetWidth}x${c.sheetHeight}`,
         trigger: c.triggerWord,
         ipadapter_weight: c.ipAdapterWeight,
         lip_sync_bbox: c.lipSyncRegion,
-        poses: c.poses.map((p) => p.poseLabel),
+        sprite_sheet_url: c.customImageUrl || null,
+        sprite_sheet_file_name: c.spriteSheetFileName || null,
+        sprite_sheet_dimensions: {
+          width: c.spriteSheetWidth || null,
+          height: c.spriteSheetHeight || null,
+        },
+        poses: c.poses.map((p) => ({
+          label: p.poseLabel,
+          description: p.description,
+          crop: p.keyframeCrop,
+          reference_image_url: p.cropImageUrl || null,
+        })),
       })),
     },
     _meta: {
