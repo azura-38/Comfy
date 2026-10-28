@@ -1,0 +1,6 @@
+{
+  "name": "VertiNode Studio",
+  "description": "Local-first ComfyUI workflow automation, character spreadsheet mapper, silent viseme lip-sync, and frame-accurate subtitle studio for 9:16 vertical dramas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
