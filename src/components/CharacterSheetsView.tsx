@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { SpriteSheetEditor } from './SpriteSheetEditor';
 import {
   Plus,
   Upload,
@@ -43,6 +44,8 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
   const [newWidth, setNewWidth] = useState<number>(targetWidth);
   const [newHeight, setNewHeight] = useState<number>(targetHeight);
   const [newTrigger, setNewTrigger] = useState('');
+  const [newAliases, setNewAliases] = useState('');
+  const [activeSpriteEditorId, setActiveSpriteEditorId] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
 
   const [csvInput, setCsvInput] = useState(
@@ -78,6 +81,7 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
       id: `char-${Date.now()}`,
       label: formattedLabel,
       displayName: trimmedName,
+      aliases: newAliases.split(',').map((alias) => alias.trim()).filter(Boolean),
       role: newRole.trim() || 'Supporting Lead',
       genre: newGenre,
       sheetWidth: Number(newWidth) || targetWidth,
@@ -118,6 +122,7 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
     setNewName('');
     setNewRole('');
     setNewTrigger('');
+    setNewAliases('');
     setFormError('');
   };
 
@@ -235,6 +240,7 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
                 <th className="py-3 px-4 text-right">Frame Dimensions</th>
                 <th className="py-3 px-4 text-right">IPAdapter Weight</th>
                 <th className="py-3 px-4">Mapped Poses</th>
+                <th className="py-3 px-4">Sprite Sheet & Crops</th>
                 <th className="py-3 px-4">Silent Lip-Sync ROI</th>
                 <th className="py-3 px-4 text-right">Actions</th>
               </tr>
@@ -303,6 +309,18 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
                     <td className="py-3.5 px-4 font-mono text-xs text-slate-300">
                       {char.poses.map((p) => p.poseLabel).join(' · ')}
                     </td>
+                    <td className="py-3.5 px-4">
+                      <div className="mb-1 text-[11px] text-slate-400">
+                        {char.customImageUrl ? 'Source saved' : 'No source sheet'} · {char.poses.length} crops
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveSpriteEditorId(activeSpriteEditorId === char.id ? null : char.id)}
+                        className="rounded-md bg-amber-500/15 border border-amber-500/30 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/25"
+                      >
+                        {activeSpriteEditorId === char.id ? 'Close editor' : char.customImageUrl ? 'Manage sprites' : 'Add sprite sheet'}
+                      </button>
+                    </td>
                     <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-400">
                       X:{char.lipSyncRegion.x} Y:{char.lipSyncRegion.y} (
                       {char.lipSyncRegion.w}×{char.lipSyncRegion.h})
@@ -326,6 +344,14 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
         </div>
       </div>
 
+      {activeSpriteEditorId && characters.some((character) => character.id === activeSpriteEditorId) && (
+        <SpriteSheetEditor
+          character={characters.find((character) => character.id === activeSpriteEditorId)!}
+          onChange={onUpdateCharacter}
+          onClose={() => setActiveSpriteEditorId(null)}
+        />
+      )}
+
       {/* Add Character Spreadsheet Row Form */}
       <form
         onSubmit={handleCreateCharacter}
@@ -346,7 +372,7 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
           </p>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
           <div>
             <label
               htmlFor="char-label-input"
@@ -442,6 +468,23 @@ export const CharacterSheetsView: React.FC<CharacterSheetsViewProps> = ({
                 className="w-full rounded-lg bg-[#0B0F17] border border-slate-800 px-2 py-2 text-xs font-mono tabular-nums text-slate-100"
               />
             </div>
+          </div>
+
+          <div>
+            <label
+              htmlFor="char-aliases-input"
+              className="block text-xs text-slate-400 mb-1"
+            >
+              Storyboard Name Aliases
+            </label>
+            <input
+              id="char-aliases-input"
+              type="text"
+              placeholder="Kaan, Kaan-kun"
+              value={newAliases}
+              onChange={(e) => setNewAliases(e.target.value)}
+              className="w-full rounded-lg bg-[#0B0F17] border border-slate-800 px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+            />
           </div>
 
           <div className="flex items-end">

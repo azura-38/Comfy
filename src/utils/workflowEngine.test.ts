@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseStoryboardLabels,
+  findMentionedCharacterLabels,
   generateSilentVisemesForSubtitle,
   validateCharacterDimensionLock,
   resolveSceneGraphMapping,
@@ -115,6 +116,34 @@ test('resolveSceneGraphMapping maps storyboard labels to character sheets and en
   assert.equal(scene4.matchedCharacter?.label, 'CHAR_KAEL');
   assert.equal(scene4.secondaryCharacter?.label, 'CHAR_VEX');
   assert.equal(scene4.inferredLayout, 'Dual Split Confrontation');
+});
+
+test('storyboard character matching resolves aliases as whole words and avoids random fallback', () => {
+  const characters = INITIAL_CHARACTERS.map((character, index) => ({
+    ...character,
+    aliases: index === 0 ? ['Kaan', 'Kaan-kun'] : index === 1 ? ['Hana'] : [],
+  }));
+
+  assert.deepEqual(
+    findMentionedCharacterLabels('Kaan walks into the cafe while Hana waits.', characters),
+    ['CHAR_KAEL', 'CHAR_LYRA']
+  );
+  assert.deepEqual(
+    findMentionedCharacterLabels('A man walks through a rainy Tokyo street.', characters),
+    []
+  );
+  assert.deepEqual(
+    findMentionedCharacterLabels('The word kaleidoscope appears inside unrelated text.', characters),
+    []
+  );
+
+  const parsed = autoParseRawStoryboardBlock(
+    'Scene 1: Empty Tokyo street\nA rainy street sits empty beneath neon signs.',
+    characters,
+    INITIAL_LORAS
+  );
+  assert.equal(parsed.length, 1);
+  assert.equal(parseStoryboardLabels(parsed[0].rawNarrative).characters.length, 0);
 });
 
 test('inferPoseAndSpriteLayoutFromNarrative and autoParseRawStoryboardBlock parse genre scripts into 2-5m sequences', () => {
