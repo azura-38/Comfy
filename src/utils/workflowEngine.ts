@@ -977,7 +977,10 @@ export function compileLocalLTXVMotionPrompt(beat: ResolvedBeat): string {
 
   const lipSyncClause = `The character articulates silent phoneme-locked mouth visemes (${visemeSample}) synchronized to the subtitle "${beat.subtitleText}" without audio drift.`;
 
-  return `${subjectClause} ${cleanNarrative} ${cameraSentenceMap[beat.cameraCurve]} ${styleClause} ${lipSyncClause}`;
+  const cinematic3DStyle =
+    'High-end cinematic 3D animated vertical drama; stylized-realistic character design, consistent facial identity and costume, detailed physically based materials, expressive facial acting, natural body proportions, realistic global illumination, soft cinematic depth of field, controlled filmic color grading, and polished environment detail. Keep the same character model and costume consistent across every shot.';
+
+  return `${cinematic3DStyle} ${subjectClause} ${cleanNarrative} ${cameraSentenceMap[beat.cameraCurve]} ${styleClause} ${lipSyncClause}`;
 }
 
 /**
