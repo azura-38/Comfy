@@ -32,6 +32,7 @@ import {
   fetchComfyStatus,
   fetchComfyQueue,
   fetchComfyObjectInfo,
+  extractNodeSchemaSummary,
   FetchLike,
 } from './comfyApiClient';
 
