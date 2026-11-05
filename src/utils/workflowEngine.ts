@@ -1008,6 +1008,19 @@ export interface WorkflowValidationIssue {
   missingInputs?: string[];
 }
 
+/**
+ * These locally generated VertiNode classes are currently pass-through placeholders.
+ * Their names may appear in /object_info, but they do not implement their advertised
+ * model/conditioning/render operations. Never treat them as production-ready nodes.
+ */
+export const PLACEHOLDER_COMFY_NODE_CLASSES = new Set([
+  'VertiNodeDynamicLoRAStack',
+  'VertiNodeCharacterSheetMapper',
+  'AnimateDiffCameraPacingController',
+  'VertiNodeSilentVisemeLipSync',
+  'VertiNodeSubtitleVideoCombine',
+]);
+
 export interface WorkflowObjectInfoValidationResult {
   verified: boolean;
   canSubmitQueue: boolean;
@@ -1427,6 +1440,15 @@ export function validateWorkflowAgainstObjectInfo(
           }
         }
       }
+    }
+
+    if (PLACEHOLDER_COMFY_NODE_CLASSES.has(node.class_type)) {
+      issues.push({
+        nodeId,
+        classType: node.class_type,
+        issueType: 'incompatible_link',
+        details: `Node #${nodeId} (${node.class_type}) is a generated pass-through placeholder and does not implement its advertised production behavior. Replace it with a real ComfyUI node/workflow before queue submission.`,
+      });
     }
 
     const schema = schemas[node.class_type];
