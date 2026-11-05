@@ -25,6 +25,7 @@ import {
   INITIAL_LORAS,
   INITIAL_STORYBOARD_BEATS,
   INITIAL_PIPELINE_CONFIG,
+  PLACEHOLDER_COMFY_NODE_CLASSES,
 } from './workflowEngine';
 import {
   validateComfyBaseUrl,
@@ -459,6 +460,12 @@ test('6. ComfyUI API: /object_info accurately detects present and missing requir
     result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.unet_name,
     '10Eros_v15.gguf'
   );
+});
+
+test('generated VertiNode pass-through placeholders are identified as not production-ready', () => {
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeCharacterSheetMapper'));
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeDynamicLoRAStack'));
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeSubtitleVideoCombine'));
 });
 
 test('ComfyUI schema extraction retains input link types for compatibility checks', () => {
