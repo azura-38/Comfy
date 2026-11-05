@@ -121,7 +121,11 @@ export interface PipelineConfig {
   silentLipSyncEnabled: boolean;
   subtitleBurnIn: boolean;
   localCacheDirectory: string;
+  ltxUnetName?: string;
   ltxTextEncoder?: string;
+  ltxProjectionsName?: string;
+  ltxVideoVaeName?: string;
+  ltxAudioVaeName?: string;
   ltxStgScale?: number;
   ltxRescale?: number;
   ltxChunkFrames?: number;
@@ -1059,12 +1063,13 @@ export function buildComfyUIWorkflowWithFallbacks(
 
   const baseLoaderInputs: Record<string, unknown> = isLTX
     ? {
-        model_name: config.checkpointName,
-        ckpt_name: config.checkpointName,
-        text_encoder: config.ltxTextEncoder || 't5xxl_fp8_e4m3fn.safetensors',
-        weight_dtype:
-          config.vramProfile === '12GB FP8 Offload' ? 'fp8_e4m3fn' : 'bfloat16',
-        local_offline_mode: true,
+        // Match the actual LTXV23ModelsLoader schema exposed by this ComfyUI install.
+        // These names are intentionally not mixed with CheckpointLoaderSimple/UNETLoader fields.
+        unet_name: config.ltxUnetName || config.checkpointName || '10Eros_v1.5-Q3_K_S.gguf',
+        text_encoder_name: config.ltxTextEncoder || '10Eros_v1.5_text_encoder.safetensors',
+        projections_name: config.ltxProjectionsName || config.ltxTextEncoder || '10Eros_v1.5_text_encoder.safetensors',
+        video_vae_name: config.ltxVideoVaeName || '10Eros_v1.5_vae.safetensors',
+        audio_vae_name: config.ltxAudioVaeName || '10Eros_v1.5_audio_vae.safetensors',
       }
     : {
         ckpt_name: config.checkpointName,
@@ -1395,13 +1400,28 @@ export function validateWorkflowAgainstObjectInfo(
         typeof inputVal[1] === 'number'
       ) {
         const targetNodeId = inputVal[0];
-        if (!workflow[targetNodeId]) {
+        const outputIndex = inputVal[1];
+        const sourceNode = workflow[targetNodeId];
+        if (!sourceNode) {
           issues.push({
             nodeId,
             classType: node.class_type,
             issueType: 'incompatible_link',
             details: `Node #${nodeId} (${node.class_type}) input "${inputName}" links to non-existent Node #${targetNodeId}.`,
           });
+        } else {
+          const sourceSchema = schemas[sourceNode.class_type];
+          const targetSchema = schemas[node.class_type];
+          const producedType = sourceSchema?.returnTypes?.[outputIndex];
+          const expectedType = targetSchema?.inputTypes?.[inputName];
+          if (producedType && expectedType && producedType !== expectedType) {
+            issues.push({
+              nodeId,
+              classType: node.class_type,
+              issueType: 'incompatible_link',
+              details: `Node #${nodeId} (${node.class_type}) input "${inputName}" expects ${expectedType}, but Node #${targetNodeId} (${sourceNode.class_type}) output ${outputIndex} provides ${producedType}.`,
+            });
+          }
         }
       }
     }
@@ -1731,7 +1751,7 @@ export const INITIAL_PIPELINE_CONFIG: PipelineConfig = {
   projectName: 'Chronicles of the Sovereign Ring',
   episodeCode: 'EP01_THE_CORTEX_SEAL',
   genre: 'Cyberpunk',
-  checkpointName: '10Eros_v15.gguf',
+  checkpointName: '10Eros_v1.5-Q3_K_S.gguf',
   architecture: 'LTX-Video',
   targetWidth: 1080,
   targetHeight: 1920,
@@ -1742,7 +1762,11 @@ export const INITIAL_PIPELINE_CONFIG: PipelineConfig = {
   silentLipSyncEnabled: true,
   subtitleBurnIn: true,
   localCacheDirectory: '/local/comfyui/output/vertical_dramas/ep01',
-  ltxTextEncoder: 't5xxl_fp8_e4m3fn.safetensors',
+  ltxUnetName: '10Eros_v1.5-Q3_K_S.gguf',
+  ltxTextEncoder: '10Eros_v1.5_text_encoder.safetensors',
+  ltxProjectionsName: '10Eros_v1.5_text_encoder.safetensors',
+  ltxVideoVaeName: '10Eros_v1.5_vae.safetensors',
+  ltxAudioVaeName: '10Eros_v1.5_audio_vae.safetensors',
   ltxStgScale: 1.4,
   ltxRescale: 0.7,
   ltxChunkFrames: 161,
