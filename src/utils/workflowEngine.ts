@@ -1003,7 +1003,8 @@ export interface WorkflowValidationIssue {
   issueType:
     | 'missing_node_class'
     | 'missing_required_input'
-    | 'incompatible_link';
+    | 'incompatible_link'
+    | 'placeholder_implementation';
   details: string;
   missingInputs?: string[];
 }
@@ -1446,7 +1447,7 @@ export function validateWorkflowAgainstObjectInfo(
       issues.push({
         nodeId,
         classType: node.class_type,
-        issueType: 'incompatible_link',
+        issueType: 'placeholder_implementation',
         details: `Node #${nodeId} (${node.class_type}) is a generated pass-through placeholder and does not implement its advertised production behavior. Replace it with a real ComfyUI node/workflow before queue submission.`,
       });
     }
