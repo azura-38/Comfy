@@ -35,6 +35,8 @@ export interface ComfyNodeSchemaSummary {
   requiredInputs: string[];
   optionalInputs: string[];
   inputDefaults: Record<string, unknown>;
+  /** Primitive or Comfy link types (e.g. MODEL, CONDITIONING, LATENT) for each input. */
+  inputTypes?: Record<string, string>;
   returnTypes: string[];
 }
 
@@ -538,6 +540,12 @@ export function extractNodeSchemaSummary(
   const requiredInputs = Object.keys(rawRequired);
   const optionalInputs = Object.keys(rawOptional);
   const inputDefaults: Record<string, unknown> = {};
+  const inputTypes: Record<string, string> = {};
+  for (const [key, spec] of [...Object.entries(rawRequired), ...Object.entries(rawOptional)]) {
+    if (Array.isArray(spec) && typeof spec[0] === 'string') {
+      inputTypes[key] = spec[0].toUpperCase();
+    }
+  }
 
   const extractDefaultFromSpec = (spec: unknown): unknown => {
     if (!Array.isArray(spec) || spec.length === 0) return undefined;
@@ -601,6 +609,7 @@ export function extractNodeSchemaSummary(
     requiredInputs,
     optionalInputs,
     inputDefaults,
+    inputTypes,
     returnTypes,
   };
 }
