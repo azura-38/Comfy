@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseStoryboardLabels,
+  findMentionedCharacterLabels,
   generateSilentVisemesForSubtitle,
   validateCharacterDimensionLock,
   resolveSceneGraphMapping,
@@ -24,6 +25,7 @@ import {
   INITIAL_LORAS,
   INITIAL_STORYBOARD_BEATS,
   INITIAL_PIPELINE_CONFIG,
+  PLACEHOLDER_COMFY_NODE_CLASSES,
 } from './workflowEngine';
 import {
   validateComfyBaseUrl,
@@ -31,6 +33,7 @@ import {
   fetchComfyStatus,
   fetchComfyQueue,
   fetchComfyObjectInfo,
+  extractNodeSchemaSummary,
   FetchLike,
 } from './comfyApiClient';
 
@@ -64,6 +67,8 @@ test('snapToLTXVFrameRule, estimateLocalLTXVHardwareMetrics, and compileLocalLTX
   assert.ok(ltxPrompt.includes('Kael Vance'));
   assert.ok(ltxPrompt.includes('dolly push-in'));
   assert.ok(ltxPrompt.includes('visemes'));
+  assert.ok(ltxPrompt.includes('High-end cinematic 3D animated vertical drama'));
+  assert.ok(ltxPrompt.includes('same character model and costume consistent'));
 });
 
 test('parseStoryboardLabels extracts character, style, pose, and camera tokens accurately', () => {
@@ -115,6 +120,34 @@ test('resolveSceneGraphMapping maps storyboard labels to character sheets and en
   assert.equal(scene4.matchedCharacter?.label, 'CHAR_KAEL');
   assert.equal(scene4.secondaryCharacter?.label, 'CHAR_VEX');
   assert.equal(scene4.inferredLayout, 'Dual Split Confrontation');
+});
+
+test('storyboard character matching resolves aliases as whole words and avoids random fallback', () => {
+  const characters = INITIAL_CHARACTERS.map((character, index) => ({
+    ...character,
+    aliases: index === 0 ? ['Kaan', 'Kaan-kun'] : index === 1 ? ['Hana'] : [],
+  }));
+
+  assert.deepEqual(
+    findMentionedCharacterLabels('Kaan walks into the cafe while Hana waits.', characters),
+    ['CHAR_KAEL', 'CHAR_LYRA']
+  );
+  assert.deepEqual(
+    findMentionedCharacterLabels('A man walks through a rainy Tokyo street.', characters),
+    []
+  );
+  assert.deepEqual(
+    findMentionedCharacterLabels('The word kaleidoscope appears inside unrelated text.', characters),
+    []
+  );
+
+  const parsed = autoParseRawStoryboardBlock(
+    'Scene 1: Empty Tokyo street\nA rainy street sits empty beneath neon signs.',
+    characters,
+    INITIAL_LORAS
+  );
+  assert.equal(parsed.length, 1);
+  assert.equal(parseStoryboardLabels(parsed[0].rawNarrative).characters.length, 0);
 });
 
 test('inferPoseAndSpriteLayoutFromNarrative and autoParseRawStoryboardBlock parse genre scripts into 2-5m sequences', () => {
@@ -176,7 +209,11 @@ test('buildComfyUIWorkflowJSON outputs valid ComfyUI API graph with LTXV23Models
 
   const classTypes = Object.values(workflow).map((n) => n.class_type);
   assert.equal(workflow['1'].class_type, 'LTXV23ModelsLoader');
-  assert.equal(workflow['1'].inputs.model_name, '10Eros_v15.gguf');
+  assert.equal(workflow['1'].inputs.unet_name, '10Eros_v1.5-Q3_K_S.gguf');
+  assert.equal(workflow['1'].inputs.text_encoder_name, '10Eros_v1.5_text_encoder.safetensors');
+  assert.equal(workflow['1'].inputs.video_vae_name, '10Eros_v1.5_vae.safetensors');
+  assert.equal(workflow['1'].inputs.audio_vae_name, '10Eros_v1.5_audio_vae.safetensors');
+  assert.equal('model_name' in workflow['1'].inputs, false);
   assert.equal(workflow['2'].inputs.width, 1080);
   assert.equal(workflow['2'].inputs.height, 1920);
   assert.equal(workflow['5'].class_type, 'AnimateDiffCameraPacingController');
@@ -373,8 +410,11 @@ test('6. ComfyUI API: /object_info accurately detects present and missing requir
     LTXV23ModelsLoader: {
       input: {
         required: {
-          model_name: [['10Eros_v15.gguf'], {}],
-          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
+          unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}],
+          text_encoder_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          projections_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          video_vae_name: [['10Eros_v1.5_vae.safetensors'], {}],
+          audio_vae_name: [['10Eros_v1.5_audio_vae.safetensors'], {}],
         },
       },
       output: ['MODEL', 'CLIP', 'VAE'],
@@ -410,13 +450,40 @@ test('6. ComfyUI API: /object_info accurately detects present and missing requir
     'EmptyLTXVLatentVideo',
   ]);
   assert.deepEqual(result.nodeSchemas?.LTXV23ModelsLoader?.requiredInputs, [
-    'model_name',
-    'text_encoder',
+    'unet_name',
+    'text_encoder_name',
+    'projections_name',
+    'video_vae_name',
+    'audio_vae_name',
   ]);
   assert.equal(
-    result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.model_name,
+    result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.unet_name,
     '10Eros_v15.gguf'
   );
+});
+
+test('generated VertiNode pass-through placeholders are identified as not production-ready', () => {
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeCharacterSheetMapper'));
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeDynamicLoRAStack'));
+  assert.ok(PLACEHOLDER_COMFY_NODE_CLASSES.has('VertiNodeSubtitleVideoCombine'));
+});
+
+test('ComfyUI schema extraction retains input link types for compatibility checks', () => {
+  const summary = extractNodeSchemaSummary('KSampler', {
+    input: {
+      required: {
+        model: ['MODEL'],
+        positive: ['CONDITIONING'],
+        negative: ['CONDITIONING'],
+        latent_image: ['LATENT'],
+        seed: ['INT'],
+      },
+    },
+    output: ['LATENT'],
+  });
+  assert.equal(summary?.inputTypes?.model, 'MODEL');
+  assert.equal(summary?.inputTypes?.positive, 'CONDITIONING');
+  assert.equal(summary?.inputTypes?.latent_image, 'LATENT');
 });
 
 test('7. ComfyUI API: invalid base URL rejection', async () => {
@@ -449,9 +516,11 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
     LTXV23ModelsLoader: {
       input: {
         required: {
-          model_name: [['10Eros_v15.gguf'], {}],
-          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
-           custom_gguf_device: [['cuda:0', 'cpu'], { default: 'cuda:0' }],
+          unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}],
+          text_encoder_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          projections_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          video_vae_name: [['10Eros_v1.5_vae.safetensors'], {}],
+          audio_vae_name: [['10Eros_v1.5_audio_vae.safetensors'], {}],
         },
       },
       output: ['MODEL', 'CLIP', 'VAE'],
@@ -566,8 +635,10 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
   );
 
   assert.equal(fallbacksApplied.length, 0);
-  // Verify additional required input from live /object_info schema was populated automatically
-  assert.equal(workflow['1'].inputs.custom_gguf_device, 'cuda:0');
+  // Loader inputs must match the live LTXV23ModelsLoader schema, not generic model_name fields.
+  assert.equal(workflow['1'].inputs.unet_name, '10Eros_v1.5-Q3_K_S.gguf');
+  assert.equal(workflow['1'].inputs.text_encoder_name, '10Eros_v1.5_text_encoder.safetensors');
+  assert.equal('model_name' in workflow['1'].inputs, false);
 
   const validation = validateWorkflowAgainstObjectInfo(
     workflow,
@@ -575,9 +646,13 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
     fallbacksApplied
   );
   assert.equal(validation.verified, true);
-  assert.equal(validation.canSubmitQueue, true);
+  // The legacy graph wires MODEL outputs into KSampler CONDITIONING inputs.
+  // Live schema validation must block it rather than claim it is queue-ready.
+  assert.equal(validation.canSubmitQueue, false);
   assert.equal(validation.missingClasses.length, 0);
   assert.equal(validation.invalidInputs.length, 0);
+  assert.ok(validation.issues.some((issue) => issue.details.includes('input "positive" expects CONDITIONING')));
+  assert.ok(validation.issues.some((issue) => issue.details.includes('input "negative" expects CONDITIONING')));
 });
 
 test('9. Workflow /object_info fallback and missing-input gate behave safely without inventing nodes', async () => {
@@ -592,7 +667,7 @@ test('9. Workflow /object_info fallback and missing-input gate behave safely wit
   // but EmptyLatentImage and the remaining nodes are installed.
   const partialObjectInfoPayload = {
     LTXV23ModelsLoader: {
-      input: { required: { model_name: [['10Eros_v15.gguf'], {}] } },
+      input: { required: { unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}] } },
       output: ['MODEL'],
     },
     EmptyLatentImage: {
@@ -684,9 +759,12 @@ test('9. Workflow /object_info fallback and missing-input gate behave safely wit
     objectInfo,
     fallbacksApplied
   );
-  assert.equal(validation.canSubmitQueue, true);
+  // The fallback removes a camera node, but does not provide CONDITIONING for KSampler.
+  // This must stay blocked until a real LTX conditioning path is included.
+  assert.equal(validation.canSubmitQueue, false);
+  assert.ok(validation.issues.some((issue) => issue.details.includes('expects CONDITIONING')));
 
-  // Verify that if a required link input is removed, validation blocks queue submission
+  // Verify that if a required link input is removed, validation still reports that missing input
   delete workflow['7'].inputs.latent_image;
   const blockedValidation = validateWorkflowAgainstObjectInfo(
     workflow,

@@ -28,13 +28,15 @@ export type SpriteLayoutMode =
 export interface CharacterPoseSprite {
   poseLabel: string; // e.g., "POSE_NEUTRAL", "POSE_DRAMATIC", "POSE_SHOCK", "POSE_SIDE"
   description: string;
-  keyframeCrop: string; // e.g., "0,0,1080,1920"
+  keyframeCrop: string; // x,y,width,height in source sprite-sheet pixels
+  cropImageUrl?: string; // persisted local crop used as a clean reference image
 }
 
 export interface CharacterSheet {
   id: string;
   label: string; // e.g., "CHAR_KAEL"
   displayName: string;
+  aliases?: string[]; // Additional names used to detect this character in storyboards
   role: string;
   genre: GenreSetting;
   sheetWidth: number;
@@ -46,7 +48,11 @@ export interface CharacterSheet {
   palettePrimary: string;
   paletteAccent: string;
   poses: CharacterPoseSprite[];
+  /** Local source image/sprite sheet. Pose crops reference regions in this image. */
   customImageUrl?: string;
+  spriteSheetFileName?: string;
+  spriteSheetWidth?: number;
+  spriteSheetHeight?: number;
 }
 
 export interface StyleLoRA {
@@ -115,7 +121,11 @@ export interface PipelineConfig {
   silentLipSyncEnabled: boolean;
   subtitleBurnIn: boolean;
   localCacheDirectory: string;
+  ltxUnetName?: string;
   ltxTextEncoder?: string;
+  ltxProjectionsName?: string;
+  ltxVideoVaeName?: string;
+  ltxAudioVaeName?: string;
   ltxStgScale?: number;
   ltxRescale?: number;
   ltxChunkFrames?: number;
@@ -176,6 +186,67 @@ export function parseStoryboardLabels(rawText: string): {
   }
 
   return { characters, styles, poses, cameras };
+}
+
+/** Normalize names consistently, including accented Latin characters. */
+function normalizeCharacterMatchText(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value
+    .replace(/[.*+?^{}()|[\]\\]/g, '\\$&')
+    .replace(/\$/g, '\\$');
+}
+
+/**
+ * Finds character names and aliases as whole words. Explicit tags remain first;
+ * prose mentions are added in the order in which they appear.
+ */
+export function findMentionedCharacterLabels(
+  rawText: string,
+  characters: CharacterSheet[],
+  explicitLabels: string[] = []
+): string[] {
+  const labels = [...new Set(explicitLabels)];
+  const text = normalizeCharacterMatchText(rawText);
+  const mentions: Array<{ label: string; index: number; characterOrder: number }> = [];
+
+  characters.forEach((character, characterOrder) => {
+    if (labels.includes(character.label)) return;
+    const candidates = [
+      character.displayName,
+      character.displayName.split(/\s+/)[0],
+      character.label,
+      character.label.replace(/^CHAR_/i, '').replace(/_/g, ' '),
+      ...(character.aliases || []),
+    ]
+      .map(normalizeCharacterMatchText)
+      .filter((name, index, all) => name.length >= 3 && all.indexOf(name) === index);
+
+    let firstIndex = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const pattern = candidate.split(/\s+/).map(escapeRegExp).join('\\s+');
+      const expression = new RegExp(
+        '(^|[^a-z0-9_])(' + pattern + ')(?=$|[^a-z0-9_])',
+        'i'
+      );
+      const match = expression.exec(text);
+      if (match) firstIndex = Math.min(firstIndex, match.index + match[1].length);
+    }
+
+    if (Number.isFinite(firstIndex)) {
+      mentions.push({ label: character.label, index: firstIndex, characterOrder });
+    }
+  });
+
+  mentions
+    .sort((a, b) => a.index - b.index || a.characterOrder - b.characterOrder)
+    .forEach((mention) => {
+      if (!labels.includes(mention.label)) labels.push(mention.label);
+    });
+
+  return labels;
 }
 
 /**
@@ -413,25 +484,16 @@ export function resolveSceneGraphMapping(
     cursorFrame += beatFrames;
     totalDurationSec += beat.durationSec;
 
-    // Also match character display names or short label names in narrative if user didn't bracket them
-    const narrativeUpper = beat.rawNarrative.toUpperCase();
-    const detectedCharLabels = [...parsed.characters];
-    for (const c of characters) {
-      const shortName = c.label.replace(/^CHAR_/, '').toUpperCase();
-      const firstName = c.displayName.split(' ')[0].toUpperCase();
-      if (
-        !detectedCharLabels.includes(c.label) &&
-        (narrativeUpper.includes(c.label) ||
-          (shortName.length >= 3 && narrativeUpper.includes(shortName)) ||
-          (firstName.length >= 3 && narrativeUpper.includes(firstName)))
-      ) {
-        detectedCharLabels.push(c.label);
-      }
-    }
+    // Resolve explicit tags first, then full names and user-defined aliases in narrative prose.
+    const detectedCharLabels = findMentionedCharacterLabels(
+      beat.rawNarrative,
+      characters,
+      parsed.characters
+    );
 
     const primaryCharLabel = detectedCharLabels[0] || '';
     const matchedCharacter =
-      characters.find((c) => c.label === primaryCharLabel) || characters[0] || null;
+      characters.find((c) => c.label === primaryCharLabel) || null;
 
     const secondaryCharLabel = detectedCharLabels[1] || '';
     const secondaryCharacter = secondaryCharLabel
@@ -558,21 +620,26 @@ export function autoParseRawStoryboardBlock(
       .trim();
 
     const parsedTags = parseStoryboardLabels(block);
+    const identifiedCharacterLabels = findMentionedCharacterLabels(
+      block,
+      characters,
+      parsedTags.characters
+    );
     const inference = inferPoseAndSpriteLayoutFromNarrative(
       block,
-      parsedTags.characters.length || 1,
+      identifiedCharacterLabels.length || 1,
       parsedTags.poses
     );
 
-    // Ensure at least one [CHAR_*] and [STYLE_*] tag is present in rawNarrative
+    // Only add a character label when the storyboard actually names a character.
+    // Do not silently assign an unrelated library entry to a location-only scene.
     let enrichedNarrative = narrativeLine;
     if (parsedTags.characters.length === 0) {
-      const matchedChar =
-        characters.find((c) =>
-          block.toUpperCase().includes(c.displayName.split(' ')[0].toUpperCase())
-        ) || characters[idx % characters.length];
+      const matchedChar = characters.find(
+        (character) => character.label === identifiedCharacterLabels[0]
+      );
       if (matchedChar) {
-        enrichedNarrative = `[${matchedChar.label}] ${enrichedNarrative}`;
+        enrichedNarrative = '[' + matchedChar.label + '] ' + enrichedNarrative;
       }
     }
     if (parsedTags.styles.length === 0) {
@@ -910,7 +977,10 @@ export function compileLocalLTXVMotionPrompt(beat: ResolvedBeat): string {
 
   const lipSyncClause = `The character articulates silent phoneme-locked mouth visemes (${visemeSample}) synchronized to the subtitle "${beat.subtitleText}" without audio drift.`;
 
-  return `${subjectClause} ${cleanNarrative} ${cameraSentenceMap[beat.cameraCurve]} ${styleClause} ${lipSyncClause}`;
+  const cinematic3DStyle =
+    'High-end cinematic 3D animated vertical drama; stylized-realistic character design, consistent facial identity and costume, detailed physically based materials, expressive facial acting, natural body proportions, realistic global illumination, soft cinematic depth of field, controlled filmic color grading, and polished environment detail. Keep the same character model and costume consistent across every shot.';
+
+  return `${cinematic3DStyle} ${subjectClause} ${cleanNarrative} ${cameraSentenceMap[beat.cameraCurve]} ${styleClause} ${lipSyncClause}`;
 }
 
 /**
@@ -933,10 +1003,24 @@ export interface WorkflowValidationIssue {
   issueType:
     | 'missing_node_class'
     | 'missing_required_input'
-    | 'incompatible_link';
+    | 'incompatible_link'
+    | 'placeholder_implementation';
   details: string;
   missingInputs?: string[];
 }
+
+/**
+ * These locally generated VertiNode classes are currently pass-through placeholders.
+ * Their names may appear in /object_info, but they do not implement their advertised
+ * model/conditioning/render operations. Never treat them as production-ready nodes.
+ */
+export const PLACEHOLDER_COMFY_NODE_CLASSES = new Set([
+  'VertiNodeDynamicLoRAStack',
+  'VertiNodeCharacterSheetMapper',
+  'AnimateDiffCameraPacingController',
+  'VertiNodeSilentVisemeLipSync',
+  'VertiNodeSubtitleVideoCombine',
+]);
 
 export interface WorkflowObjectInfoValidationResult {
   verified: boolean;
@@ -996,12 +1080,13 @@ export function buildComfyUIWorkflowWithFallbacks(
 
   const baseLoaderInputs: Record<string, unknown> = isLTX
     ? {
-        model_name: config.checkpointName,
-        ckpt_name: config.checkpointName,
-        text_encoder: config.ltxTextEncoder || 't5xxl_fp8_e4m3fn.safetensors',
-        weight_dtype:
-          config.vramProfile === '12GB FP8 Offload' ? 'fp8_e4m3fn' : 'bfloat16',
-        local_offline_mode: true,
+        // Match the actual LTXV23ModelsLoader schema exposed by this ComfyUI install.
+        // These names are intentionally not mixed with CheckpointLoaderSimple/UNETLoader fields.
+        unet_name: config.ltxUnetName || config.checkpointName || '10Eros_v1.5-Q3_K_S.gguf',
+        text_encoder_name: config.ltxTextEncoder || '10Eros_v1.5_text_encoder.safetensors',
+        projections_name: config.ltxProjectionsName || config.ltxTextEncoder || '10Eros_v1.5_text_encoder.safetensors',
+        video_vae_name: config.ltxVideoVaeName || '10Eros_v1.5_vae.safetensors',
+        audio_vae_name: config.ltxAudioVaeName || '10Eros_v1.5_audio_vae.safetensors',
       }
     : {
         ckpt_name: config.checkpointName,
@@ -1088,11 +1173,23 @@ export function buildComfyUIWorkflowWithFallbacks(
       character_sheets: characters.map((c) => ({
         label: c.label,
         name: c.displayName,
+        aliases: c.aliases || [],
         dimensions: `${c.sheetWidth}x${c.sheetHeight}`,
         trigger: c.triggerWord,
         ipadapter_weight: c.ipAdapterWeight,
         lip_sync_bbox: c.lipSyncRegion,
-        poses: c.poses.map((p) => p.poseLabel),
+        sprite_sheet_url: c.customImageUrl || null,
+        sprite_sheet_file_name: c.spriteSheetFileName || null,
+        sprite_sheet_dimensions: {
+          width: c.spriteSheetWidth || null,
+          height: c.spriteSheetHeight || null,
+        },
+        poses: c.poses.map((p) => ({
+          label: p.poseLabel,
+          description: p.description,
+          crop: p.keyframeCrop,
+          reference_image_url: p.cropImageUrl || null,
+        })),
       })),
     },
     _meta: {
@@ -1320,15 +1417,39 @@ export function validateWorkflowAgainstObjectInfo(
         typeof inputVal[1] === 'number'
       ) {
         const targetNodeId = inputVal[0];
-        if (!workflow[targetNodeId]) {
+        const outputIndex = inputVal[1];
+        const sourceNode = workflow[targetNodeId];
+        if (!sourceNode) {
           issues.push({
             nodeId,
             classType: node.class_type,
             issueType: 'incompatible_link',
             details: `Node #${nodeId} (${node.class_type}) input "${inputName}" links to non-existent Node #${targetNodeId}.`,
           });
+        } else {
+          const sourceSchema = schemas[sourceNode.class_type];
+          const targetSchema = schemas[node.class_type];
+          const producedType = sourceSchema?.returnTypes?.[outputIndex];
+          const expectedType = targetSchema?.inputTypes?.[inputName];
+          if (producedType && expectedType && producedType !== expectedType) {
+            issues.push({
+              nodeId,
+              classType: node.class_type,
+              issueType: 'incompatible_link',
+              details: `Node #${nodeId} (${node.class_type}) input "${inputName}" expects ${expectedType}, but Node #${targetNodeId} (${sourceNode.class_type}) output ${outputIndex} provides ${producedType}.`,
+            });
+          }
         }
       }
+    }
+
+    if (PLACEHOLDER_COMFY_NODE_CLASSES.has(node.class_type)) {
+      issues.push({
+        nodeId,
+        classType: node.class_type,
+        issueType: 'placeholder_implementation',
+        details: `Node #${nodeId} (${node.class_type}) is a generated pass-through placeholder and does not implement its advertised production behavior. Replace it with a real ComfyUI node/workflow before queue submission.`,
+      });
     }
 
     const schema = schemas[node.class_type];
@@ -1656,7 +1777,7 @@ export const INITIAL_PIPELINE_CONFIG: PipelineConfig = {
   projectName: 'Chronicles of the Sovereign Ring',
   episodeCode: 'EP01_THE_CORTEX_SEAL',
   genre: 'Cyberpunk',
-  checkpointName: '10Eros_v15.gguf',
+  checkpointName: '10Eros_v1.5-Q3_K_S.gguf',
   architecture: 'LTX-Video',
   targetWidth: 1080,
   targetHeight: 1920,
@@ -1667,7 +1788,11 @@ export const INITIAL_PIPELINE_CONFIG: PipelineConfig = {
   silentLipSyncEnabled: true,
   subtitleBurnIn: true,
   localCacheDirectory: '/local/comfyui/output/vertical_dramas/ep01',
-  ltxTextEncoder: 't5xxl_fp8_e4m3fn.safetensors',
+  ltxUnetName: '10Eros_v1.5-Q3_K_S.gguf',
+  ltxTextEncoder: '10Eros_v1.5_text_encoder.safetensors',
+  ltxProjectionsName: '10Eros_v1.5_text_encoder.safetensors',
+  ltxVideoVaeName: '10Eros_v1.5_vae.safetensors',
+  ltxAudioVaeName: '10Eros_v1.5_audio_vae.safetensors',
   ltxStgScale: 1.4,
   ltxRescale: 0.7,
   ltxChunkFrames: 161,

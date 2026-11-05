@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Private local character sheets and derived sprite crops
+/data/character-assets/

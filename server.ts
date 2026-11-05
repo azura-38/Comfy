@@ -1,5 +1,7 @@
 import express from 'express';
 import path from 'path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, ThinkingLevel, GenerateContentResponse } from '@google/genai';
@@ -31,7 +33,59 @@ const HOST =
     ? '0.0.0.0'
     : '127.0.0.1');
 
+
 app.use(express.json({ limit: '50mb' }));
+
+// Local-only persistent image library for character sprite sheets and generated crops.
+const CHARACTER_ASSET_DIR = path.join(__dirname, 'data', 'character-assets');
+app.use('/character-assets', express.static(CHARACTER_ASSET_DIR, {
+  fallthrough: true,
+  maxAge: '1h',
+}));
+
+app.post('/api/assets/character-sprite', async (req, res) => {
+  try {
+    const { dataUrl, fileName } = req.body as { dataUrl?: unknown; fileName?: unknown };
+    if (typeof dataUrl !== 'string' || typeof fileName !== 'string') {
+      res.status(400).json({ error: 'dataUrl and fileName are required.' });
+      return;
+    }
+
+    const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\r\n]+)$/.exec(dataUrl);
+    if (!match) {
+      res.status(400).json({ error: 'Only PNG, JPEG, and WebP data URLs are accepted.' });
+      return;
+    }
+
+    const buffer = Buffer.from(match[2], 'base64');
+    if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) {
+      res.status(413).json({ error: 'Image must be smaller than 5 MB after compression.' });
+      return;
+    }
+
+    const extension = match[1] === 'image/jpeg' ? '.jpg' : match[1] === 'image/webp' ? '.webp' : '.png';
+    const safeStem = fileName
+      .replace(/\.[^.]+$/, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'character-sprite';
+    const savedName = safeStem + '-' + randomUUID() + extension;
+
+    await mkdir(CHARACTER_ASSET_DIR, { recursive: true });
+    await writeFile(path.join(CHARACTER_ASSET_DIR, savedName), buffer, { flag: 'wx' });
+
+    res.status(201).json({
+      url: '/character-assets/' + savedName,
+      fileName: savedName,
+      bytes: buffer.length,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not save character image.';
+    res.status(500).json({ error: message });
+  }
+});
+
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
