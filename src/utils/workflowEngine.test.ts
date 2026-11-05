@@ -506,9 +506,11 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
     LTXV23ModelsLoader: {
       input: {
         required: {
-          model_name: [['10Eros_v15.gguf'], {}],
-          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
-           custom_gguf_device: [['cuda:0', 'cpu'], { default: 'cuda:0' }],
+          unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}],
+          text_encoder_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          projections_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          video_vae_name: [['10Eros_v1.5_vae.safetensors'], {}],
+          audio_vae_name: [['10Eros_v1.5_audio_vae.safetensors'], {}],
         },
       },
       output: ['MODEL', 'CLIP', 'VAE'],
@@ -623,8 +625,10 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
   );
 
   assert.equal(fallbacksApplied.length, 0);
-  // Verify additional required input from live /object_info schema was populated automatically
-  assert.equal(workflow['1'].inputs.custom_gguf_device, 'cuda:0');
+  // Loader inputs must match the live LTXV23ModelsLoader schema, not generic model_name fields.
+  assert.equal(workflow['1'].inputs.unet_name, '10Eros_v1.5-Q3_K_S.gguf');
+  assert.equal(workflow['1'].inputs.text_encoder_name, '10Eros_v1.5_text_encoder.safetensors');
+  assert.equal('model_name' in workflow['1'].inputs, false);
 
   const validation = validateWorkflowAgainstObjectInfo(
     workflow,
@@ -632,9 +636,13 @@ test('8. Workflow /object_info validation verifies all 8 nodes and required inpu
     fallbacksApplied
   );
   assert.equal(validation.verified, true);
-  assert.equal(validation.canSubmitQueue, true);
+  // The legacy graph wires MODEL outputs into KSampler CONDITIONING inputs.
+  // Live schema validation must block it rather than claim it is queue-ready.
+  assert.equal(validation.canSubmitQueue, false);
   assert.equal(validation.missingClasses.length, 0);
   assert.equal(validation.invalidInputs.length, 0);
+  assert.ok(validation.issues.some((issue) => issue.details.includes('input "positive" expects CONDITIONING')));
+  assert.ok(validation.issues.some((issue) => issue.details.includes('input "negative" expects CONDITIONING')));
 });
 
 test('9. Workflow /object_info fallback and missing-input gate behave safely without inventing nodes', async () => {
