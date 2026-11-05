@@ -66,6 +66,8 @@ test('snapToLTXVFrameRule, estimateLocalLTXVHardwareMetrics, and compileLocalLTX
   assert.ok(ltxPrompt.includes('Kael Vance'));
   assert.ok(ltxPrompt.includes('dolly push-in'));
   assert.ok(ltxPrompt.includes('visemes'));
+  assert.ok(ltxPrompt.includes('High-end cinematic 3D animated vertical drama'));
+  assert.ok(ltxPrompt.includes('same character model and costume consistent'));
 });
 
 test('parseStoryboardLabels extracts character, style, pose, and camera tokens accurately', () => {
