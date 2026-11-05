@@ -205,7 +205,11 @@ test('buildComfyUIWorkflowJSON outputs valid ComfyUI API graph with LTXV23Models
 
   const classTypes = Object.values(workflow).map((n) => n.class_type);
   assert.equal(workflow['1'].class_type, 'LTXV23ModelsLoader');
-  assert.equal(workflow['1'].inputs.model_name, '10Eros_v15.gguf');
+  assert.equal(workflow['1'].inputs.unet_name, '10Eros_v1.5-Q3_K_S.gguf');
+  assert.equal(workflow['1'].inputs.text_encoder_name, '10Eros_v1.5_text_encoder.safetensors');
+  assert.equal(workflow['1'].inputs.video_vae_name, '10Eros_v1.5_vae.safetensors');
+  assert.equal(workflow['1'].inputs.audio_vae_name, '10Eros_v1.5_audio_vae.safetensors');
+  assert.equal('model_name' in workflow['1'].inputs, false);
   assert.equal(workflow['2'].inputs.width, 1080);
   assert.equal(workflow['2'].inputs.height, 1920);
   assert.equal(workflow['5'].class_type, 'AnimateDiffCameraPacingController');
@@ -402,8 +406,11 @@ test('6. ComfyUI API: /object_info accurately detects present and missing requir
     LTXV23ModelsLoader: {
       input: {
         required: {
-          model_name: [['10Eros_v15.gguf'], {}],
-          text_encoder: [['t5xxl_fp8_e4m3fn.safetensors'], {}],
+          unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}],
+          text_encoder_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          projections_name: [['10Eros_v1.5_text_encoder.safetensors'], {}],
+          video_vae_name: [['10Eros_v1.5_vae.safetensors'], {}],
+          audio_vae_name: [['10Eros_v1.5_audio_vae.safetensors'], {}],
         },
       },
       output: ['MODEL', 'CLIP', 'VAE'],
@@ -439,13 +446,34 @@ test('6. ComfyUI API: /object_info accurately detects present and missing requir
     'EmptyLTXVLatentVideo',
   ]);
   assert.deepEqual(result.nodeSchemas?.LTXV23ModelsLoader?.requiredInputs, [
-    'model_name',
-    'text_encoder',
+    'unet_name',
+    'text_encoder_name',
+    'projections_name',
+    'video_vae_name',
+    'audio_vae_name',
   ]);
   assert.equal(
-    result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.model_name,
+    result.nodeSchemas?.LTXV23ModelsLoader?.inputDefaults.unet_name,
     '10Eros_v15.gguf'
   );
+});
+
+test('ComfyUI schema extraction retains input link types for compatibility checks', () => {
+  const summary = extractNodeSchemaSummary('KSampler', {
+    input: {
+      required: {
+        model: ['MODEL'],
+        positive: ['CONDITIONING'],
+        negative: ['CONDITIONING'],
+        latent_image: ['LATENT'],
+        seed: ['INT'],
+      },
+    },
+    output: ['LATENT'],
+  });
+  assert.equal(summary?.inputTypes?.model, 'MODEL');
+  assert.equal(summary?.inputTypes?.positive, 'CONDITIONING');
+  assert.equal(summary?.inputTypes?.latent_image, 'LATENT');
 });
 
 test('7. ComfyUI API: invalid base URL rejection', async () => {
@@ -621,7 +649,7 @@ test('9. Workflow /object_info fallback and missing-input gate behave safely wit
   // but EmptyLatentImage and the remaining nodes are installed.
   const partialObjectInfoPayload = {
     LTXV23ModelsLoader: {
-      input: { required: { model_name: [['10Eros_v15.gguf'], {}] } },
+      input: { required: { unet_name: [['10Eros_v1.5-Q3_K_S.gguf'], {}] } },
       output: ['MODEL'],
     },
     EmptyLatentImage: {
