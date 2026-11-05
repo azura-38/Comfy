@@ -749,9 +749,12 @@ test('9. Workflow /object_info fallback and missing-input gate behave safely wit
     objectInfo,
     fallbacksApplied
   );
-  assert.equal(validation.canSubmitQueue, true);
+  // The fallback removes a camera node, but does not provide CONDITIONING for KSampler.
+  // This must stay blocked until a real LTX conditioning path is included.
+  assert.equal(validation.canSubmitQueue, false);
+  assert.ok(validation.issues.some((issue) => issue.details.includes('expects CONDITIONING')));
 
-  // Verify that if a required link input is removed, validation blocks queue submission
+  // Verify that if a required link input is removed, validation still reports that missing input
   delete workflow['7'].inputs.latent_image;
   const blockedValidation = validateWorkflowAgainstObjectInfo(
     workflow,
